@@ -4,8 +4,8 @@
   "description": "Real-time face recognition server using YuNet and SFace",
   "main": "server.js",
   "scripts": {
-    "start": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./galleryHook.js -r ./uiFinalFixHook.js server.js",
-    "dev": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./galleryHook.js -r ./uiFinalFixHook.js server.js",
+    "start": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./galleryHook.js server.js",
+    "dev": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./galleryHook.js server.js",
     "reset-db": "node -r ./sqliteHook.js -e \"require('./db.js').resetAll()\""
   },
   "dependencies": {
@@ -16,8 +16,6 @@
     "multer": "^1.4.5-lts.1",
     "ws": "^8.17.0"
   },
-  "engines": {
-    "node": ">=18.0.0"
-  },
+  "engines": { "node": ">=18.0.0" },
   "private": true
 }
