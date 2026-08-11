@@ -9,6 +9,23 @@ const previousStatic = express.static;
 function appendEventDetailsJs(source) {
   if (source.includes('function atomicOpenEventDetails(')) return source;
 
+  // Disable the old live-event image-preview click handler. The new Event Details
+  // popup is now the only click behavior for Live Monitor event cards/photos.
+  source = source.replace(
+`  const cropImg = item.querySelector('.event-crop');
+  if (cropImg) {
+    cropImg.addEventListener('click', () => {
+      if (modalImagePreview && previewImageElement && previewImageTitle) {
+        previewImageElement.src = cropUrl;
+        previewImageTitle.textContent = \`${ev.person_name} - ${ev.camera_name || 'Manual Upload'} @ ${timeStr}\`;
+        modalImagePreview.classList.remove('hidden');
+      }
+    });
+  }`,
+`  // Legacy single-photo preview removed. Event cards/photos now open the
+  // Atomic Vision Event Details popup only.`
+  );
+
   return source + `
 
 // -------------------------------------------------------------
@@ -52,7 +69,6 @@ function atomicEnsureEventDetailsModal() {
         <div class="atomic-event-modal-body">
           <div class="atomic-event-photo-panel">
             <img id="atomic-event-photo" src="" alt="Captured face event">
-            <button class="btn btn-secondary btn-sm" id="atomic-event-open-photo"><i class="fa-solid fa-expand"></i> View Full Photo</button>
           </div>
           <div class="atomic-event-info-panel">
             <div class="atomic-event-status" id="atomic-event-status"></div>
@@ -87,13 +103,14 @@ function atomicOpenEventDetails(ev) {
   document.getElementById('atomic-event-zone').textContent = ev.zone || ev.camera_name || 'Manual Upload';
   document.getElementById('atomic-event-date').textContent = valid ? dt.toLocaleDateString([], {year:'numeric',month:'short',day:'2-digit'}) : '—';
   document.getElementById('atomic-event-time').textContent = valid ? dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '—';
-  document.getElementById('atomic-event-open-photo').onclick = function(){ window.open(photo,'_blank','noopener'); };
   modal.classList.remove('hidden');
 }
 
 function atomicCloseEventDetails() {
   const modal = document.getElementById('atomic-event-details-modal');
   if (modal) modal.classList.add('hidden');
+  // Defensive cleanup in case an old cached preview modal was open.
+  if (typeof modalImagePreview !== 'undefined' && modalImagePreview) modalImagePreview.classList.add('hidden');
 }
 
 document.addEventListener('DOMContentLoaded', function(){
@@ -104,6 +121,8 @@ document.addEventListener('DOMContentLoaded', function(){
       if (e.target.closest('.event-actions-dropdown,.btn-event-dots,.dropdown-menu,.dropdown-item')) return;
       const item = e.target.closest('.event-item');
       if (!item) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
       const id = item.getAttribute('data-event-id');
       const ev = Array.isArray(allEvents) ? allEvents.find(x => String(x.id) === String(id)) : null;
       if (ev) atomicOpenEventDetails(ev);
@@ -131,4 +150,4 @@ express.static = function(root, options) {
   };
 };
 
-console.log('[UI] Live event details popup enabled without overriding Atomic Vision UI.');
+console.log('[UI] Live event details popup enabled; legacy single-photo preview disabled.');
