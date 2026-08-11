@@ -2,13 +2,20 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 
-// Keep the original frontend source untouched. This preload only patches the
-// served app.js in memory so live recognition updates change one event card
-// instead of clearing and rebuilding the entire events list.
+// Keep the original frontend source untouched. This preload patches the served
+// app.js so Live Monitor contains only the newest 100 events and updates cards
+// without clearing/rebuilding the entire list.
 const originalStatic = express.static;
 
 function patchAppJs(source) {
   let patched = source;
+
+  // Regardless of how many events the API returns, Live Monitor keeps only
+  // the newest 100. Historical events remain in SQLite/Event Gallery/reports.
+  patched = patched.replace(
+    /allEvents\s*=\s*await\s+response\.json\(\);/g,
+    `allEvents = (await response.json()).slice(0, 100);`
+  );
 
   patched = patched.replace(
 `  } else if (msg.event === 'database_updated') {
@@ -99,9 +106,6 @@ function patchAppJs(source) {
     return;
   }
 
-  // Build the updated card using the existing renderer, then move that new
-  // node into the old card's position. All operations happen synchronously,
-  // so the rest of the event list never disappears or flickers.
   appendEventHTML(updated, false);
   const replacement = eventsList.lastElementChild;
   existingItem.replaceWith(replacement);
@@ -114,9 +118,7 @@ function patchAppJs(source) {
 express.static = function patchedStatic(root, options) {
   const normalStatic = originalStatic(root, options);
   const isPublicRoot = path.basename(path.resolve(root)) === 'public';
-
   if (!isPublicRoot) return normalStatic;
-
   return function noFlickerStatic(req, res, next) {
     if (req.path === '/js/app.js') {
       try {
@@ -132,4 +134,4 @@ express.static = function patchedStatic(root, options) {
   };
 };
 
-console.log('[UI] No-flicker live event updates enabled.');
+console.log('[UI] No-flicker live event updates enabled (latest 100 only).');
