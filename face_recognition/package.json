@@ -4,15 +4,14 @@
   "description": "Real-time face recognition server using YuNet and SFace",
   "main": "server.js",
   "scripts": {
-    "start": "node -r ./googleSheetsHook.js -r ./uiNoFlickerHook.js server.js",
-    "dev": "node -r ./googleSheetsHook.js -r ./uiNoFlickerHook.js server.js",
+    "start": "node -r ./reportHook.js -r ./uiNoFlickerHook.js server.js",
+    "dev": "node -r ./reportHook.js -r ./uiNoFlickerHook.js server.js",
     "reset-db": "node -e \"require('./db.js').resetAll()\""
   },
   "dependencies": {
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
     "express": "^4.19.2",
-    "googleapis": "^144.0.0",
     "multer": "^1.4.5-lts.1",
     "ws": "^8.17.0"
   },
