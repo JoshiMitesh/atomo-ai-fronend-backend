@@ -4,11 +4,12 @@
   "description": "Real-time face recognition server using YuNet and SFace",
   "main": "server.js",
   "scripts": {
-    "start": "node -r ./reportHook.js -r ./uiNoFlickerHook.js server.js",
-    "dev": "node -r ./reportHook.js -r ./uiNoFlickerHook.js server.js",
-    "reset-db": "node -e \"require('./db.js').resetAll()\""
+    "start": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js server.js",
+    "dev": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js server.js",
+    "reset-db": "node -r ./sqliteHook.js -e \"require('./db.js').resetAll()\""
   },
   "dependencies": {
+    "better-sqlite3": "^11.10.0",
     "cors": "^2.8.5",
     "exceljs": "^4.4.0",
     "express": "^4.19.2",
