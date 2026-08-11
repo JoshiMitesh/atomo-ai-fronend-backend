@@ -4,11 +4,8 @@
   "description": "Real-time face recognition server using YuNet and SFace",
   "main": "server.js",
   "scripts": {
-    "prestart": "python3 apply_runtime_fixes.py",
-    "start": "node server.js",
-    "predev": "python3 apply_runtime_fixes.py",
-    "dev": "node server.js",
-    "apply-fixes": "python3 apply_runtime_fixes.py",
+    "start": "node -r ./googleSheetsHook.js server.js",
+    "dev": "node -r ./googleSheetsHook.js server.js",
     "reset-db": "node -e \"require('./db.js').resetAll()\""
   },
   "dependencies": {
