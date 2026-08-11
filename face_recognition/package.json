@@ -4,14 +4,18 @@
   "description": "Real-time face recognition server using YuNet and SFace",
   "main": "server.js",
   "scripts": {
+    "prestart": "python3 apply_runtime_fixes.py",
     "start": "node server.js",
+    "predev": "python3 apply_runtime_fixes.py",
     "dev": "node server.js",
+    "apply-fixes": "python3 apply_runtime_fixes.py",
     "reset-db": "node -e \"require('./db.js').resetAll()\""
   },
   "dependencies": {
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "googleapis": "^144.0.0",
     "multer": "^1.4.5-lts.1",
     "ws": "^8.17.0"
   },
