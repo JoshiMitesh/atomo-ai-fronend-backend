@@ -1,0 +1,16 @@
+logLevel: info
+
+rtsp: true
+rtspAddress: :8554
+
+rtmp: false
+hls: false
+
+webrtc: true
+webrtcAddress: :8889
+webrtcAllowOrigin: "*"
+
+api: true
+apiAddress: :9997
+
+paths: {}
