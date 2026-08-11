@@ -1,157 +1,31 @@
-const fs = require('fs');
-const path = require('path');
-const express = require('express');
-
-const previousStatic = express.static;
-
-function injectGallery(html) {
-  if (!html.includes('data-tab="gallery"')) {
-    html = html.replace(
-      '<a href="#" class="nav-item" data-tab="settings">',
-      `<a href="#" class="nav-item" data-tab="gallery">
-          <i class="fa-solid fa-images"></i>
-          <span>Event Gallery</span>
-        </a>
-        <a href="#" class="nav-item" data-tab="settings">`
-    );
-  }
-
-  if (!html.includes('id="tab-content-gallery"')) {
-    const section = `
-        <!-- EVENT PHOTO GALLERY -->
-        <section id="tab-content-gallery" class="tab-content">
-          <div class="card">
-            <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;">
-              <div>
-                <h2>Event Photo Gallery</h2>
-                <p style="margin:6px 0 0;color:var(--text-muted);font-size:.86rem;">Browse captured face events by authorization status.</p>
-              </div>
-              <div id="gallery-filter" style="display:flex;gap:8px;flex-wrap:wrap;">
-                <button class="btn btn-primary gallery-filter-btn" data-gallery-filter="all">All</button>
-                <button class="btn btn-secondary gallery-filter-btn" data-gallery-filter="known"><i class="fa-solid fa-user-check"></i> Authorized</button>
-                <button class="btn btn-secondary gallery-filter-btn" data-gallery-filter="unknown"><i class="fa-solid fa-user-xmark"></i> Unauthorized</button>
-              </div>
-            </div>
-            <div class="card-body">
-              <div id="gallery-summary" style="margin-bottom:16px;color:var(--text-muted);font-size:.88rem;"></div>
-              <div id="event-gallery-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;"></div>
-            </div>
-          </div>
-        </section>
-`;
-    html = html.replace('        <!-- ============================================== -->\n        <!-- TAB 4: SETTINGS -->', section + '\n        <!-- ============================================== -->\n        <!-- TAB 4: SETTINGS -->');
-  }
-
-  const script = `
-<script>
-(function () {
-  let galleryEvents = [];
-  let galleryFilter = 'all';
-
-  function esc(v) {
-    return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) {
-      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
-    });
-  }
-
-  function renderGallery() {
-    const grid = document.getElementById('event-gallery-grid');
-    const summary = document.getElementById('gallery-summary');
-    if (!grid) return;
-
-    const rows = galleryEvents.filter(function(ev) {
-      if (galleryFilter === 'known') return ev.is_known === true;
-      if (galleryFilter === 'unknown') return ev.is_known === false;
-      return true;
-    }).filter(function(ev) { return !!ev.crop_filename; });
-
-    const knownCount = galleryEvents.filter(e => e.is_known === true && e.crop_filename).length;
-    const unknownCount = galleryEvents.filter(e => e.is_known === false && e.crop_filename).length;
-    if (summary) summary.textContent = rows.length + ' photos shown • ' + knownCount + ' authorized • ' + unknownCount + ' unauthorized';
-
-    if (!rows.length) {
-      grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><i class="fa-solid fa-images"></i><p>No photos found for this filter.</p></div>';
-      return;
-    }
-
-    grid.innerHTML = rows.map(function(ev) {
-      const known = ev.is_known === true;
-      const dt = ev.timestamp ? new Date(ev.timestamp) : null;
-      const date = dt && !isNaN(dt) ? dt.toLocaleDateString() : '';
-      const time = dt && !isNaN(dt) ? dt.toLocaleTimeString() : '';
-      const name = known ? (ev.person_name || 'Known') : 'Unknown';
-      const score = Math.round(Number(ev.score || 0) * 100);
-      const photo = '/crops/' + encodeURIComponent(ev.crop_filename);
-      return '<div style="background:var(--card-bg);border:1px solid var(--border-color);border-radius:12px;overflow:hidden;">' +
-        '<div style="height:180px;background:#111;display:flex;align-items:center;justify-content:center;overflow:hidden;">' +
-          '<img src="' + photo + '" alt="' + esc(name) + '" loading="lazy" style="width:100%;height:100%;object-fit:cover;">' +
-        '</div>' +
-        '<div style="padding:12px;">' +
-          '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px;">' +
-            '<strong style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + esc(name) + '</strong>' +
-            '<span style="font-size:.72rem;font-weight:700;color:' + (known ? '#22c55e' : '#ef4444') + ';">' + (known ? 'AUTHORIZED' : 'UNAUTHORIZED') + '</span>' +
-          '</div>' +
-          '<div style="color:var(--text-muted);font-size:.78rem;line-height:1.55;">' +
-            '<div><i class="fa-regular fa-calendar"></i> ' + esc(date) + ' &nbsp; <i class="fa-regular fa-clock"></i> ' + esc(time) + '</div>' +
-            '<div><i class="fa-solid fa-video"></i> ' + esc(ev.camera_name || 'Manual Upload') + '</div>' +
-            '<div>Confidence: ' + score + '%</div>' +
-          '</div>' +
-        '</div>' +
-      '</div>';
-    }).join('');
-  }
-
-  async function loadGallery() {
-    const grid = document.getElementById('event-gallery-grid');
-    if (grid) grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><div class="spinner"></div><p>Loading event photos...</p></div>';
-    try {
-      const res = await fetch('/api/events?limit=1000');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      galleryEvents = await res.json();
-      renderGallery();
-    } catch (err) {
-      if (grid) grid.innerHTML = '<div class="empty-state" style="grid-column:1/-1;"><i class="fa-solid fa-triangle-exclamation"></i><p>Failed to load event photos.</p></div>';
-    }
-  }
-
-  document.addEventListener('DOMContentLoaded', function () {
-    document.querySelectorAll('.gallery-filter-btn').forEach(function(btn) {
-      btn.addEventListener('click', function() {
-        galleryFilter = btn.dataset.galleryFilter;
-        document.querySelectorAll('.gallery-filter-btn').forEach(function(b) {
-          b.classList.toggle('btn-primary', b === btn);
-          b.classList.toggle('btn-secondary', b !== btn);
-        });
-        renderGallery();
-      });
-    });
-
-    const nav = document.querySelector('[data-tab="gallery"]');
-    if (nav) nav.addEventListener('click', function() { setTimeout(loadGallery, 0); });
-  });
-})();
-</script>
-`;
-  if (!html.includes('function renderGallery()')) html = html.replace('</body>', script + '</body>');
-  return html;
+const fs=require('fs');const path=require('path');const express=require('express');const previousStatic=express.static;
+function inject(html){
+// Remove standalone Face Database and Photo Analyzer navigation. Rename profiles area.
+html=html.replace(/<a href="#" class="nav-item" data-tab="database">[\s\S]*?<\/a>/,'');
+html=html.replace(/<a href="#" class="nav-item" data-tab="analyzer">[\s\S]*?<\/a>/,'');
+html=html.replace('<span>Discovered Profiles</span>','<span>Profiles</span>');
+// Keep existing database/analyzer sections in DOM so original JS remains safe, but they are no longer standalone pages.
+if(!html.includes('id="profile-view-tabs"')){
+ html=html.replace('<section id="tab-content-clusters" class="tab-content">',`<section id="tab-content-clusters" class="tab-content">
+ <div id="profile-view-tabs" style="display:flex;gap:8px;margin-bottom:16px;">
+  <button class="btn btn-primary profile-view-btn" data-profile-view="clusters"><i class="fa-solid fa-folder-open"></i> Discovered Profiles</button>
+  <button class="btn btn-secondary profile-view-btn" data-profile-view="database"><i class="fa-solid fa-users"></i> Face Database</button>
+ </div>`);
 }
-
-express.static = function galleryStatic(root, options) {
-  const normalStatic = previousStatic(root, options);
-  const isPublicRoot = path.basename(path.resolve(root)) === 'public';
-  if (!isPublicRoot) return normalStatic;
-  return function(req, res, next) {
-    if (req.path === '/' || req.path === '/index.html') {
-      try {
-        const html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
-        res.type('html').send(injectGallery(html));
-        return;
-      } catch (err) {
-        console.error('[Gallery] UI injection failed:', err.message);
-      }
-    }
-    return normalStatic(req, res, next);
-  };
-};
-
-console.log('[Gallery] Authorized/unauthorized event gallery enabled.');
+// Gallery pagination controls.
+if(!html.includes('id="gallery-pagination"')) html=html.replace('<div id="event-gallery-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;"></div>','<div id="event-gallery-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:16px;"></div><div id="gallery-pagination" style="display:flex;align-items:center;justify-content:center;gap:12px;margin-top:22px;"></div>');
+const script=`<script>(function(){
+const PAGE=100;let page=1,filter='all',events=[];
+function esc(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function rows(){return events.filter(e=>e.crop_filename&&(filter==='all'||(filter==='known'&&e.is_known===true)||(filter==='unknown'&&e.is_known===false)));}
+function render(){const g=document.getElementById('event-gallery-grid'),s=document.getElementById('gallery-summary'),p=document.getElementById('gallery-pagination');if(!g)return;const all=rows(),pages=Math.max(1,Math.ceil(all.length/PAGE));if(page>pages)page=pages;const shown=all.slice((page-1)*PAGE,page*PAGE);const kc=events.filter(e=>e.is_known===true&&e.crop_filename).length,uc=events.filter(e=>e.is_known===false&&e.crop_filename).length;if(s)s.textContent=all.length+' photos • '+kc+' authorized • '+uc+' unauthorized • Page '+page+' of '+pages;
+if(!shown.length)g.innerHTML='<div class="empty-state" style="grid-column:1/-1;"><i class="fa-solid fa-images"></i><p>No photos found for this filter.</p></div>';else g.innerHTML=shown.map(e=>{const k=e.is_known===true,d=e.timestamp?new Date(e.timestamp):null,n=k?(e.person_name||'Known'):'Unknown',sc=Math.round(Number(e.score||0)*100),ph='/crops/'+encodeURIComponent(e.crop_filename);return '<div style="background:var(--card-bg);border:1px solid var(--border-color);border-radius:12px;overflow:hidden;"><div style="height:180px;background:#111;overflow:hidden;"><img src="'+ph+'" loading="lazy" style="width:100%;height:100%;object-fit:cover;"></div><div style="padding:12px;"><div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:8px;"><strong>'+esc(n)+'</strong><span style="font-size:.7rem;font-weight:700;color:'+(k?'#22c55e':'#ef4444')+'">'+(k?'AUTHORIZED':'UNAUTHORIZED')+'</span></div><div style="color:var(--text-muted);font-size:.78rem;line-height:1.55"><div>'+(d&&!isNaN(d)?d.toLocaleDateString()+' '+d.toLocaleTimeString():'')+'</div><div><i class="fa-solid fa-video"></i> '+esc(e.camera_name||'Manual Upload')+'</div><div>Confidence: '+sc+'%</div></div></div></div>'}).join('');
+if(p)p.innerHTML=pages<=1?'':'<button class="btn btn-secondary" id="gallery-prev" '+(page===1?'disabled':'')+'><i class="fa-solid fa-chevron-left"></i> Previous</button><span style="color:var(--text-muted)">Page '+page+' / '+pages+'</span><button class="btn btn-secondary" id="gallery-next" '+(page===pages?'disabled':'')+'>Next <i class="fa-solid fa-chevron-right"></i></button>';const pr=document.getElementById('gallery-prev'),nx=document.getElementById('gallery-next');if(pr)pr.onclick=()=>{page--;render();window.scrollTo({top:0,behavior:'smooth'})};if(nx)nx.onclick=()=>{page++;render();window.scrollTo({top:0,behavior:'smooth'})};}
+async function load(){const g=document.getElementById('event-gallery-grid');if(g)g.innerHTML='<div class="empty-state" style="grid-column:1/-1"><div class="spinner"></div><p>Loading event photos...</p></div>';try{const r=await fetch('/api/events?limit=5000');if(!r.ok)throw Error();events=await r.json();page=1;render();}catch(e){if(g)g.innerHTML='<div class="empty-state" style="grid-column:1/-1"><p>Failed to load event photos.</p></div>';}}
+function showProfileView(v){const clusters=document.getElementById('clusters-grid'),db=document.getElementById('tab-content-database'),search=document.getElementById('cluster-search-input');if(v==='database'){if(clusters)clusters.style.display='none';if(search&&search.closest('.db-actions-bar'))search.closest('.db-actions-bar').style.display='none';if(db){db.style.display='block';db.classList.add('active');db.style.marginTop='0';}}else{if(db){db.style.display='none';db.classList.remove('active');}if(clusters)clusters.style.display='grid';if(search&&search.closest('.db-actions-bar'))search.closest('.db-actions-bar').style.display='';}document.querySelectorAll('.profile-view-btn').forEach(b=>{b.classList.toggle('btn-primary',b.dataset.profileView===v);b.classList.toggle('btn-secondary',b.dataset.profileView!==v);});}
+document.addEventListener('DOMContentLoaded',()=>{document.querySelectorAll('.gallery-filter-btn').forEach(b=>b.addEventListener('click',()=>{filter=b.dataset.galleryFilter;page=1;document.querySelectorAll('.gallery-filter-btn').forEach(x=>{x.classList.toggle('btn-primary',x===b);x.classList.toggle('btn-secondary',x!==b)});render()}));const nav=document.querySelector('[data-tab="gallery"]');if(nav)nav.addEventListener('click',()=>setTimeout(load,0));document.querySelectorAll('.profile-view-btn').forEach(b=>b.addEventListener('click',()=>showProfileView(b.dataset.profileView)));const pn=document.querySelector('[data-tab="clusters"]');if(pn)pn.addEventListener('click',()=>setTimeout(()=>showProfileView('clusters'),0));});})();</script>`;
+// Remove old gallery script injected by earlier hook before adding new one.
+html=html.replace(/<script>\n\(function \(\) \{[\s\S]*?\}\)\(\);\n<\/script>\n?/,'');
+if(!html.includes('const PAGE=100'))html=html.replace('</body>',script+'</body>');return html;}
+express.static=function(root,options){const normal=previousStatic(root,options);if(path.basename(path.resolve(root))!=='public')return normal;return function(req,res,next){if(req.path==='/'||req.path==='/index.html'){try{res.type('html').send(inject(fs.readFileSync(path.join(root,'index.html'),'utf8')));return;}catch(e){console.error('[Gallery] UI injection failed:',e.message)}}return normal(req,res,next)}};
+console.log('[UI] Profiles merged; Photo Analyzer hidden; Event Gallery pagination enabled (100/page).');
