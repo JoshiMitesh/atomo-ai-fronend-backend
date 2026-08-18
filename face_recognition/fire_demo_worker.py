@@ -33,23 +33,19 @@ def safe_box(box, width, height):
     return x1, y1, x2, y2
 
 
-def save_fire_crop(frame, box, events_dir, stamp, index):
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = safe_box(box, w, h)
-    bw = x2 - x1
-    bh = y2 - y1
-    pad_x = int(bw * 0.15)
-    pad_y = int(bh * 0.15)
-    x1 = max(0, x1 - pad_x)
-    y1 = max(0, y1 - pad_y)
-    x2 = min(w, x2 + pad_x)
-    y2 = min(h, y2 + pad_y)
-    crop = frame[y1:y2, x1:x2]
-    if crop.size == 0:
-        return None
-    name = f"fire_crop_{stamp}_{index}.jpg"
+def save_fire_frame(frame, detections, events_dir, stamp):
+    output = frame.copy()
+    for det in detections:
+        if det.get("label") != "fire":
+            continue
+        x1, y1, x2, y2 = det["box"]
+        score = float(det.get("score", 0.0))
+        cv.rectangle(output, (x1, y1), (x2, y2), (0, 0, 255), 3)
+        text = f"FIRE {score:.2f}"
+        cv.putText(output, text, (x1, max(24, y1 - 8)), cv.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2, cv.LINE_AA)
+    name = f"fire_frame_{stamp}.jpg"
     out = os.path.join(events_dir, name)
-    if not cv.imwrite(out, crop, [cv.IMWRITE_JPEG_QUALITY, 92]):
+    if not cv.imwrite(out, output, [cv.IMWRITE_JPEG_QUALITY, 92]):
         return None
     return name
 
@@ -79,13 +75,7 @@ def main():
     fire.NUM_CLS = 3
     fire.LISTSIZE = 67
 
-    detector = fire.DetectionWorker(
-        args.model,
-        args.library,
-        process_interval=0.0,
-        debug=False,
-        result_log_every=999999,
-    )
+    detector = fire.DetectionWorker(args.model, args.library, process_interval=0.0, debug=False, result_log_every=999999)
     detector.initialize()
 
     cap = cv.VideoCapture(args.input)
@@ -103,12 +93,7 @@ def main():
     start_wall = time.monotonic()
     next_sample_wall = start_wall
 
-    emit({
-        "type": "metadata",
-        "fps": fps,
-        "total_frames": total_frames,
-        "duration": duration,
-    })
+    emit({"type": "metadata", "fps": fps, "total_frames": total_frames, "duration": duration})
 
     try:
         while True:
@@ -121,8 +106,6 @@ def main():
             if duration > 0 and elapsed >= duration:
                 break
 
-            # Stay synchronized to real video time. If inference takes longer than
-            # one sample interval, jump forward instead of processing a backlog.
             target_frame = max(0, int(elapsed * fps))
             current_pos = int(cap.get(cv.CAP_PROP_POS_FRAMES))
             if abs(target_frame - current_pos) > max(2, int(fps * 0.20)):
@@ -139,7 +122,6 @@ def main():
             _seq, boxes, scores, classes = detector.process_frame_sync(frame_pos + 1, frame)
             h, w = frame.shape[:2]
             overlays = []
-            fire_hits = []
 
             for box, score, cls_id in zip(boxes, scores, classes):
                 cls_id = int(cls_id)
@@ -147,45 +129,31 @@ def main():
                 if label not in ("fire", "smoke"):
                     continue
                 x1, y1, x2, y2 = safe_box(box, w, h)
-                overlays.append({
-                    "label": label,
-                    "score": float(score),
-                    "box": [x1, y1, x2, y2],
-                })
-                if label == "fire":
-                    fire_hits.append((box, float(score), cls_id))
+                overlays.append({"label": label, "score": float(score), "box": [x1, y1, x2, y2]})
 
-            emit({
-                "type": "detections",
-                "video_time": video_time,
-                "frame_width": w,
-                "frame_height": h,
-                "detections": overlays,
-            })
+            emit({"type": "detections", "video_time": video_time, "frame_width": w, "frame_height": h, "detections": overlays})
 
             if duration > 0:
                 emit({"type": "progress", "progress": min(99, int(video_time * 100.0 / duration))})
 
+            fire_hits = [d for d in overlays if d.get("label") == "fire"]
             if fire_hits and video_time - last_fire_event_at >= args.event_cooldown:
                 now = datetime.now(timezone.utc)
                 stamp = now.strftime("%Y%m%d_%H%M%S_%f")
-                for idx, (box, score, cls_id) in enumerate(fire_hits):
-                    image_name = save_fire_crop(frame, box, args.events_dir, stamp, idx)
-                    if not image_name:
-                        continue
+                image_name = save_fire_frame(frame, overlays, args.events_dir, stamp)
+                if image_name:
                     emit({
                         "type": "event",
-                        "id": f"fire_{stamp}_{idx}",
+                        "id": f"fire_{stamp}",
                         "label": "fire",
-                        "score": score,
+                        "score": max(float(d.get("score", 0.0)) for d in fire_hits),
                         "timestamp": now.isoformat(),
                         "video_time": video_time,
                         "image": image_name,
+                        "detections": fire_hits,
                     })
                 last_fire_event_at = video_time
 
-            # Keep sample cadence tied to wall clock. If inference was slow,
-            # schedule from 'now' so we never build a queue of stale frames.
             next_sample_wall += interval
             finished = time.monotonic()
             if finished > next_sample_wall + interval:
