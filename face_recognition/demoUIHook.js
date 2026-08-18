@@ -1,23 +1,11 @@
 const express = require('express');
 
-// Keep Demo browser code in public/js/demo.js instead of embedding a second
-// template literal inside this Node preload hook. This avoids Node parsing CSS
-// selectors from nested browser-script backticks.
 const originalSend = express.response.send;
-
 express.response.send = function patchedDemoSend(body) {
-  if (
-    typeof body === 'string' &&
-    body.includes('</body>') &&
-    !body.includes('/js/demo.js')
-  ) {
-    body = body.replace(
-      '</body>',
-      '<script src="/js/demo.js?v=5"></script>\n</body>'
-    );
+  if (typeof body === 'string' && body.includes('</body>') && !body.includes('/js/demo.js')) {
+    body = body.replace('</body>', '<script src="/js/demo.js?v=6"></script>\n</body>');
   }
-
   return originalSend.call(this, body);
 };
 
-console.log('[Demo] Live fire preview + same-page fire events UI enabled.');
+console.log('[Demo] Real-time video + NPU overlay UI enabled.');
