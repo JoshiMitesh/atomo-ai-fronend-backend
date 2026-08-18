@@ -2,20 +2,16 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 
-// IMPORTANT: patch only /js/app.js. Never intercept index.html here, otherwise
-// this can bypass the Atomic Vision UI supplied by galleryHook.js.
+// IMPORTANT: patch only /js/app.js. Never intercept index.html here.
 const previousStatic = express.static;
 
 function appendEventDetailsJs(source) {
   if (source.includes('function atomicOpenEventDetails(')) return source;
 
-  // The capture-phase click listener below runs before the original crop-image
-  // click handler and calls stopImmediatePropagation(), so the legacy single-photo
-  // preview never opens. We intentionally avoid rewriting the original function.
   return source + `
 
 // -------------------------------------------------------------
-// Atomic Vision - Live Event Details Popup
+// Atomic Vision - Live Event Details + Reliable Event Filters
 // -------------------------------------------------------------
 function atomicEnsureEventDetailsModal() {
   if (document.getElementById('atomic-event-details-modal')) return;
@@ -33,7 +29,6 @@ function atomicEnsureEventDetailsModal() {
     .atomic-event-close{width:38px;height:38px;border-radius:9px;border:1px solid var(--border-color);background:transparent;color:var(--text-muted);cursor:pointer;font-size:1rem}
     .atomic-event-close:hover{color:#fff;background:rgba(255,255,255,.05)}
     .atomic-event-modal-body{display:grid;grid-template-columns:minmax(220px,.9fr) minmax(270px,1.1fr);gap:22px;padding:22px}
-    .atomic-event-photo-panel{display:flex;flex-direction:column;gap:12px}
     .atomic-event-photo-panel img{width:100%;aspect-ratio:1/1;object-fit:cover;border-radius:14px;background:#080b12;border:1px solid var(--border-color)}
     .atomic-event-info-panel{display:flex;flex-direction:column}
     .atomic-event-status{display:inline-flex;align-self:flex-start;padding:7px 11px;border-radius:999px;font-size:.75rem;font-weight:800;letter-spacing:.04em;margin-bottom:12px}
@@ -49,18 +44,13 @@ function atomicEnsureEventDetailsModal() {
   const wrap = document.createElement('div');
   wrap.innerHTML = \`
     <div class="atomic-event-modal hidden" id="atomic-event-details-modal">
-      <div class="atomic-event-dialog" role="dialog" aria-modal="true" aria-labelledby="atomic-event-title">
+      <div class="atomic-event-dialog" role="dialog" aria-modal="true">
         <div class="atomic-event-modal-header">
-          <div>
-            <div class="atomic-event-modal-kicker">Event Details</div>
-            <h3 id="atomic-event-title">Face Event</h3>
-          </div>
-          <button class="atomic-event-close" id="atomic-event-close" aria-label="Close"><i class="fa-solid fa-xmark"></i></button>
+          <div><div class="atomic-event-modal-kicker">Event Details</div><h3 id="atomic-event-title">Face Event</h3></div>
+          <button class="atomic-event-close" id="atomic-event-close"><i class="fa-solid fa-xmark"></i></button>
         </div>
         <div class="atomic-event-modal-body">
-          <div class="atomic-event-photo-panel">
-            <img id="atomic-event-photo" src="" alt="Captured face event">
-          </div>
+          <div class="atomic-event-photo-panel"><img id="atomic-event-photo" src="" alt="Captured face event"></div>
           <div class="atomic-event-info-panel">
             <div class="atomic-event-status" id="atomic-event-status"></div>
             <div class="atomic-event-info-row"><span>Person</span><strong id="atomic-event-person">—</strong></div>
@@ -72,87 +62,74 @@ function atomicEnsureEventDetailsModal() {
       </div>
     </div>\`;
   document.body.appendChild(wrap.firstElementChild);
-
   document.getElementById('atomic-event-close').addEventListener('click', atomicCloseEventDetails);
-  document.getElementById('atomic-event-details-modal').addEventListener('click', function(e){
-    if (e.target === this) atomicCloseEventDetails();
-  });
+  document.getElementById('atomic-event-details-modal').addEventListener('click', function(e){ if(e.target===this) atomicCloseEventDetails(); });
 }
 
 function atomicOpenEventDetails(ev) {
   if (!ev) return;
   atomicEnsureEventDetailsModal();
-
-  // Make absolutely sure the old preview is closed before showing details.
-  if (typeof modalImagePreview !== 'undefined' && modalImagePreview) {
-    modalImagePreview.classList.add('hidden');
-  }
-
-  const modal = document.getElementById('atomic-event-details-modal');
-  const dt = ev.timestamp ? new Date(ev.timestamp) : null;
-  const valid = dt && !isNaN(dt.getTime());
-  const known = ev.is_known === true;
-  const photo = ev.crop_filename
-    ? '/crops/' + encodeURIComponent(ev.crop_filename)
-    : 'https://placehold.co/500x500?text=Face';
-
-  document.getElementById('atomic-event-photo').src = photo;
-  document.getElementById('atomic-event-title').textContent = known
-    ? (ev.person_name || 'Authorised Person')
-    : (ev.person_name || 'Unauthorised Profile');
-
-  const status = document.getElementById('atomic-event-status');
-  status.textContent = known ? 'AUTHORISED' : 'UNAUTHORISED';
-  status.className = 'atomic-event-status ' + (known ? 'authorised' : 'unauthorised');
-
-  document.getElementById('atomic-event-person').textContent = ev.person_name || (known ? 'Known' : 'Unknown');
-  document.getElementById('atomic-event-zone').textContent = ev.zone || ev.camera_name || 'Manual Upload';
-  document.getElementById('atomic-event-date').textContent = valid
-    ? dt.toLocaleDateString([], { year:'numeric', month:'short', day:'2-digit' })
-    : '—';
-  document.getElementById('atomic-event-time').textContent = valid
-    ? dt.toLocaleTimeString([], { hour:'2-digit', minute:'2-digit', second:'2-digit' })
-    : '—';
-
+  if (typeof modalImagePreview !== 'undefined' && modalImagePreview) modalImagePreview.classList.add('hidden');
+  const modal=document.getElementById('atomic-event-details-modal');
+  const dt=ev.timestamp?new Date(ev.timestamp):null;
+  const valid=dt&&!isNaN(dt.getTime());
+  const known=ev.is_known===true;
+  const photo=ev.crop_filename?'/crops/'+encodeURIComponent(ev.crop_filename):'https://placehold.co/500x500?text=Face';
+  document.getElementById('atomic-event-photo').src=photo;
+  document.getElementById('atomic-event-title').textContent=known?(ev.person_name||'Authorised Person'):(ev.person_name||'Unauthorised Profile');
+  const status=document.getElementById('atomic-event-status');
+  status.textContent=known?'AUTHORISED':'UNAUTHORISED';
+  status.className='atomic-event-status '+(known?'authorised':'unauthorised');
+  document.getElementById('atomic-event-person').textContent=ev.person_name||(known?'Known':'Unknown');
+  document.getElementById('atomic-event-zone').textContent=ev.zone||ev.camera_name||'Manual Upload';
+  document.getElementById('atomic-event-date').textContent=valid?dt.toLocaleDateString([], {year:'numeric',month:'short',day:'2-digit'}):'—';
+  document.getElementById('atomic-event-time').textContent=valid?dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}):'—';
   modal.classList.remove('hidden');
 }
 
-function atomicCloseEventDetails() {
-  const modal = document.getElementById('atomic-event-details-modal');
-  if (modal) modal.classList.add('hidden');
-  if (typeof modalImagePreview !== 'undefined' && modalImagePreview) {
-    modalImagePreview.classList.add('hidden');
-  }
+function atomicCloseEventDetails(){
+  const modal=document.getElementById('atomic-event-details-modal');
+  if(modal)modal.classList.add('hidden');
+  if(typeof modalImagePreview!=='undefined'&&modalImagePreview)modalImagePreview.classList.add('hidden');
 }
 
-document.addEventListener('DOMContentLoaded', function(){
+function atomicApplyEventFilter(filterValue){
+  currentEventFilter=filterValue;
+  const buttons=document.querySelectorAll('.event-tab-btn');
+  buttons.forEach(function(btn){
+    const active=btn.getAttribute('data-event-filter')===filterValue;
+    btn.classList.toggle('active',active);
+    btn.style.color=active?'var(--text-light)':'var(--text-muted)';
+  });
+  filterAndRenderEvents();
+}
+
+document.addEventListener('DOMContentLoaded',function(){
   atomicEnsureEventDetailsModal();
 
-  const list = document.getElementById('events-list');
-  if (list) {
-    // Capture phase is intentional: it prevents the original event-crop click
-    // handler from ever running.
-    list.addEventListener('click', function(e){
-      if (e.target.closest('.event-actions-dropdown,.btn-event-dots,.dropdown-menu,.dropdown-item')) return;
-      const item = e.target.closest('.event-item');
-      if (!item) return;
-
+  // Attach these independently from setupEventListeners(). This keeps the tabs
+  // working even if another optional UI element is absent.
+  document.querySelectorAll('.event-tab-btn').forEach(function(btn){
+    btn.addEventListener('click',function(e){
       e.preventDefault();
       e.stopPropagation();
-      e.stopImmediatePropagation();
-
-      const id = item.getAttribute('data-event-id');
-      const ev = Array.isArray(allEvents)
-        ? allEvents.find(x => String(x.id) === String(id))
-        : null;
-
-      if (ev) atomicOpenEventDetails(ev);
-    }, true);
-  }
-
-  document.addEventListener('keydown', function(e){
-    if (e.key === 'Escape') atomicCloseEventDetails();
+      atomicApplyEventFilter(btn.getAttribute('data-event-filter'));
+    });
   });
+
+  const list=document.getElementById('events-list');
+  if(list){
+    list.addEventListener('click',function(e){
+      if(e.target.closest('.event-actions-dropdown,.btn-event-dots,.dropdown-menu,.dropdown-item'))return;
+      const item=e.target.closest('.event-item');
+      if(!item)return;
+      e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
+      const id=item.getAttribute('data-event-id');
+      const ev=Array.isArray(allEvents)?allEvents.find(x=>String(x.id)===String(id)):null;
+      if(ev)atomicOpenEventDetails(ev);
+    },true);
+  }
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')atomicCloseEventDetails();});
 });
 `;
 }
@@ -160,19 +137,16 @@ document.addEventListener('DOMContentLoaded', function(){
 express.static = function(root, options) {
   const normal = previousStatic(root, options);
   if (path.basename(path.resolve(root)) !== 'public') return normal;
-
-  return function(req, res, next) {
-    if (req.path === '/js/app.js') {
-      try {
-        const source = fs.readFileSync(path.join(root, 'js', 'app.js'), 'utf8');
+  return function(req,res,next){
+    if(req.path==='/js/app.js'){
+      try{
+        const source=fs.readFileSync(path.join(root,'js','app.js'),'utf8');
         res.type('application/javascript').send(appendEventDetailsJs(source));
         return;
-      } catch (err) {
-        console.error('[UI] Event details JS patch failed:', err.message);
-      }
+      }catch(err){console.error('[UI] Event details/filter JS patch failed:',err.message);}
     }
-    return normal(req, res, next);
+    return normal(req,res,next);
   };
 };
 
-console.log('[UI] Live event details popup fixed; legacy single-photo preview blocked.');
+console.log('[UI] Live event popup + Authorised/Unauthorised filters fixed.');
