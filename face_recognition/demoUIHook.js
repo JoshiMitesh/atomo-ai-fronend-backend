@@ -13,11 +13,11 @@ express.response.send = function patchedDemoSend(body) {
   ) {
     body = body.replace(
       '</body>',
-      '<script src="/js/demo.js?v=3"></script>\n</body>'
+      '<script src="/js/demo.js?v=5"></script>\n</body>'
     );
   }
 
   return originalSend.call(this, body);
 };
 
-console.log('[Demo] Centered Demo UI + reliable card navigation enabled.');
+console.log('[Demo] Live fire preview + same-page fire events UI enabled.');
