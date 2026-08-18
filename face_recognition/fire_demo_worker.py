@@ -4,7 +4,6 @@ import importlib.util
 import json
 import os
 import sys
-import time
 from datetime import datetime, timezone
 
 import cv2 as cv
@@ -24,6 +23,45 @@ def load_fire_module(script_path):
     return module
 
 
+def safe_box(box, width, height):
+    x1, y1, x2, y2 = [int(v) for v in box]
+    x1 = max(0, min(width - 1, x1))
+    y1 = max(0, min(height - 1, y1))
+    x2 = max(x1 + 1, min(width, x2))
+    y2 = max(y1 + 1, min(height, y2))
+    return x1, y1, x2, y2
+
+
+def save_preview(path, frame):
+    if not path:
+        return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp.jpg"
+    if cv.imwrite(tmp, frame, [cv.IMWRITE_JPEG_QUALITY, 82]):
+        os.replace(tmp, path)
+
+
+def save_fire_crop(frame, box, events_dir, stamp, index):
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = safe_box(box, w, h)
+    bw = x2 - x1
+    bh = y2 - y1
+    pad_x = int(bw * 0.15)
+    pad_y = int(bh * 0.15)
+    x1 = max(0, x1 - pad_x)
+    y1 = max(0, y1 - pad_y)
+    x2 = min(w, x2 + pad_x)
+    y2 = min(h, y2 + pad_y)
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    name = f"fire_crop_{stamp}_{index}.jpg"
+    out = os.path.join(events_dir, name)
+    if not cv.imwrite(out, crop, [cv.IMWRITE_JPEG_QUALITY, 92]):
+        return None
+    return name
+
+
 def main():
     ap = argparse.ArgumentParser(description="Atomic Vision fire-demo event worker")
     ap.add_argument("--input", required=True)
@@ -31,9 +69,10 @@ def main():
     ap.add_argument("--model", required=True)
     ap.add_argument("--library", required=True)
     ap.add_argument("--events-dir", required=True)
+    ap.add_argument("--preview", default="")
     ap.add_argument("--threshold", type=float, default=0.15)
     ap.add_argument("--nms-threshold", type=float, default=0.45)
-    ap.add_argument("--sample-fps", type=float, default=5.0)
+    ap.add_argument("--sample-fps", type=float, default=6.0)
     ap.add_argument("--event-cooldown", type=float, default=2.0)
     args = ap.parse_args()
 
@@ -69,7 +108,7 @@ def main():
     frame_step = max(1, int(round(fps / max(0.1, args.sample_fps))))
     frame_index = 0
     processed = 0
-    last_event_at = {"fire": -1e9, "smoke": -1e9}
+    last_fire_event_at = -1e9
 
     try:
         while True:
@@ -82,58 +121,57 @@ def main():
                 continue
 
             processed += 1
-            seq, boxes, scores, classes = detector.process_frame_sync(current_index + 1, frame)
+            _seq, boxes, scores, classes = detector.process_frame_sync(current_index + 1, frame)
             video_time = current_index / fps
 
-            if total_frames > 0:
-                progress = min(99, int((current_index + 1) * 100 / total_frames))
-                emit({"type": "progress", "progress": progress})
-
-            if len(boxes) == 0:
-                continue
-
-            # One annotated snapshot may contain multiple fire/smoke detections.
-            interesting = []
+            annotated = frame.copy()
+            fire_hits = []
             for box, score, cls_id in zip(boxes, scores, classes):
                 cls_id = int(cls_id)
                 label = fire.CLASSES[cls_id] if 0 <= cls_id < len(fire.CLASSES) else str(cls_id)
                 if label not in ("fire", "smoke"):
                     continue
-                if video_time - last_event_at[label] < args.event_cooldown:
-                    continue
-                interesting.append((box, float(score), cls_id, label))
-
-            if not interesting:
-                continue
-
-            annotated = frame.copy()
-            for box, score, cls_id, label in interesting:
-                x1, y1, x2, y2 = [int(v) for v in box]
-                x1 = max(0, min(annotated.shape[1] - 1, x1))
-                y1 = max(0, min(annotated.shape[0] - 1, y1))
-                x2 = max(x1 + 1, min(annotated.shape[1], x2))
-                y2 = max(y1 + 1, min(annotated.shape[0], y2))
+                x1, y1, x2, y2 = safe_box(box, annotated.shape[1], annotated.shape[0])
                 color = fire.CLASS_COLORS.get(label, (0, 0, 255))
                 cv.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
-                cv.putText(annotated, f"{label.upper()} {score:.2f}", (x1, max(25, y1 - 8)), cv.FONT_HERSHEY_SIMPLEX, 0.75, color, 2)
+                cv.putText(
+                    annotated,
+                    f"{label.upper()} {float(score):.2f}",
+                    (x1, max(25, y1 - 8)),
+                    cv.FONT_HERSHEY_SIMPLEX,
+                    0.75,
+                    color,
+                    2,
+                )
+                if label == "fire":
+                    fire_hits.append((box, float(score), cls_id))
 
-            now = datetime.now(timezone.utc)
-            stamp = now.strftime("%Y%m%d_%H%M%S_%f")
-            image_name = f"fire_event_{stamp}.jpg"
-            image_path = os.path.join(args.events_dir, image_name)
-            cv.imwrite(image_path, annotated, [cv.IMWRITE_JPEG_QUALITY, 92])
+            # Live UI preview: always write the currently processed frame, with
+            # boxes when fire/smoke is detected. Atomic replace avoids partial JPGs.
+            save_preview(args.preview, annotated)
 
-            for box, score, cls_id, label in interesting:
-                last_event_at[label] = video_time
-                emit({
-                    "type": "event",
-                    "id": f"{label}_{stamp}_{cls_id}",
-                    "label": label,
-                    "score": score,
-                    "timestamp": now.isoformat(),
-                    "video_time": video_time,
-                    "image": image_name,
-                })
+            if total_frames > 0:
+                emit({"type": "progress", "progress": min(99, int((current_index + 1) * 100 / total_frames))})
+
+            # Events are FIRE ONLY, and each saved image is only the detected
+            # fire region (with a small context pad), never the full video frame.
+            if fire_hits and video_time - last_fire_event_at >= args.event_cooldown:
+                now = datetime.now(timezone.utc)
+                stamp = now.strftime("%Y%m%d_%H%M%S_%f")
+                for idx, (box, score, cls_id) in enumerate(fire_hits):
+                    image_name = save_fire_crop(frame, box, args.events_dir, stamp, idx)
+                    if not image_name:
+                        continue
+                    emit({
+                        "type": "event",
+                        "id": f"fire_{stamp}_{idx}",
+                        "label": "fire",
+                        "score": score,
+                        "timestamp": now.isoformat(),
+                        "video_time": video_time,
+                        "image": image_name,
+                    })
+                last_fire_event_at = video_time
     finally:
         cap.release()
         detector.stop()
