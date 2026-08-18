@@ -9,10 +9,9 @@ const DEMO_ROOT = path.join(ROOT, 'demo_media');
 const DEMO_VIDEOS = path.join(DEMO_ROOT, 'videos');
 const FIRE_VIDEOS = path.join(DEMO_ROOT, 'fire_videos');
 const FIRE_EVENTS = path.join(DEMO_ROOT, 'fire_events');
-const FIRE_PREVIEWS = path.join(DEMO_ROOT, 'fire_previews');
 const EVENTS_JSON = path.join(FIRE_EVENTS, 'events.json');
 
-for (const dir of [DEMO_VIDEOS, FIRE_VIDEOS, FIRE_EVENTS, FIRE_PREVIEWS]) fs.mkdirSync(dir, { recursive: true });
+for (const dir of [DEMO_VIDEOS, FIRE_VIDEOS, FIRE_EVENTS]) fs.mkdirSync(dir, { recursive: true });
 if (!fs.existsSync(EVENTS_JSON)) fs.writeFileSync(EVENTS_JSON, '[]\n');
 
 const VIDEO_EXT = new Set(['.mp4', '.webm', '.mov', '.mkv', '.avi', '.m4v']);
@@ -62,7 +61,6 @@ function attach(app) {
   app.use('/demo-media/videos', express.static(DEMO_VIDEOS));
   app.use('/demo-media/fire-videos', express.static(FIRE_VIDEOS));
   app.use('/demo-media/fire-events', express.static(FIRE_EVENTS));
-  app.use('/demo-media/fire-previews', express.static(FIRE_PREVIEWS, { etag: false, maxAge: 0 }));
 
   app.get('/api/demo/videos', (_req, res) => res.json(listVideos(DEMO_VIDEOS, '/demo-media/videos')));
   app.get('/api/demo/fire/videos', (_req, res) => res.json(listVideos(FIRE_VIDEOS, '/demo-media/fire-videos')));
@@ -71,6 +69,7 @@ function attach(app) {
   app.get('/api/demo/fire/jobs/:id', (req, res) => {
     const job = jobs.get(req.params.id);
     if (!job) return res.status(404).json({ error: 'Detection job not found.' });
+    res.set('Cache-Control', 'no-store');
     res.json(publicJob(job));
   });
 
@@ -87,6 +86,7 @@ function attach(app) {
   app.post('/api/demo/fire/start', express.json(), (req, res) => {
     const name = safeName(req.body && req.body.video);
     if (!name) return res.status(400).json({ error: 'Valid video name is required.' });
+
     const input = path.join(FIRE_VIDEOS, name);
     if (!fs.existsSync(input)) return res.status(404).json({ error: `Fire demo video not found: ${name}` });
 
@@ -95,8 +95,6 @@ function attach(app) {
       if (!fs.existsSync(file)) return res.status(500).json({ error: `${label} file not found: ${file}` });
     }
 
-    // Stop an older demo detector before starting another. This prevents NPU
-    // contention and also makes navigation away from detection responsive.
     for (const old of jobs.values()) {
       if (old.child && !old.child.killed && ['starting', 'running'].includes(old.status)) {
         old.status = 'stopping';
@@ -105,19 +103,34 @@ function attach(app) {
     }
 
     const id = `fire_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const previewName = `${id}.jpg`;
-    const previewPath = path.join(FIRE_PREVIEWS, previewName);
     const job = {
-      id, video: name, status: 'starting', progress: 0, error: null,
+      id,
+      video: name,
+      video_url: `/demo-media/fire-videos/${encodeURIComponent(name)}`,
+      status: 'starting',
+      progress: 0,
+      error: null,
       started_at: new Date().toISOString(),
-      preview_url: `/demo-media/fire-previews/${encodeURIComponent(previewName)}`,
+      duration: 0,
+      source_fps: 0,
+      latest_detection: {
+        video_time: 0,
+        frame_width: 0,
+        frame_height: 0,
+        detections: [],
+      },
+      event_count: 0,
     };
     jobs.set(id, job);
 
     const child = spawn(cfg.python, [
       '-u', path.join(ROOT, 'fire_demo_worker.py'),
-      '--input', input, '--script', cfg.script, '--model', cfg.model,
-      '--library', cfg.library, '--events-dir', FIRE_EVENTS, '--preview', previewPath,
+      '--input', input,
+      '--script', cfg.script,
+      '--model', cfg.model,
+      '--library', cfg.library,
+      '--events-dir', FIRE_EVENTS,
+      '--sample-fps', process.env.FIRE_DEMO_FPS || '4',
     ], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
 
     job.child = child;
@@ -130,20 +143,47 @@ function attach(app) {
       stdoutBuf += chunk.toString();
       const lines = stdoutBuf.split(/\r?\n/);
       stdoutBuf = lines.pop();
+
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const msg = JSON.parse(line);
-          if (msg.type === 'progress') job.progress = msg.progress;
+
+          if (msg.type === 'metadata') {
+            job.source_fps = Number(msg.fps || 0);
+            job.duration = Number(msg.duration || 0);
+            job.total_frames = Number(msg.total_frames || 0);
+          }
+
+          if (msg.type === 'progress') {
+            job.progress = Number(msg.progress || 0);
+          }
+
+          if (msg.type === 'detections') {
+            job.latest_detection = {
+              video_time: Number(msg.video_time || 0),
+              frame_width: Number(msg.frame_width || 0),
+              frame_height: Number(msg.frame_height || 0),
+              detections: Array.isArray(msg.detections) ? msg.detections : [],
+              updated_at: Date.now(),
+            };
+          }
+
           if (msg.type === 'event' && msg.label === 'fire') {
             const events = readEvents();
-            const event = { ...msg, video: name, image_url: `/demo-media/fire-events/${encodeURIComponent(msg.image)}` };
+            const event = {
+              ...msg,
+              video: name,
+              image_url: `/demo-media/fire-events/${encodeURIComponent(msg.image)}`,
+            };
             events.unshift(event);
             writeEvents(events);
             job.last_event = event;
             job.event_count = Number(job.event_count || 0) + 1;
           }
-        } catch (_) { console.log(`[FireDemo] ${line}`); }
+        } catch (_) {
+          console.log(`[FireDemo] ${line}`);
+        }
       }
     });
 
@@ -153,7 +193,12 @@ function attach(app) {
       if (stderrBuf.length > 12000) stderrBuf = stderrBuf.slice(-12000);
       console.error(`[FireDemo] ${text.trim()}`);
     });
-    child.on('error', (err) => { job.status = 'error'; job.error = err.message; });
+
+    child.on('error', (err) => {
+      job.status = 'error';
+      job.error = err.message;
+    });
+
     child.on('close', (code, signal) => {
       job.child = null;
       job.finished_at = new Date().toISOString();
@@ -177,4 +222,4 @@ http.createServer = function patchedCreateServer(requestListener, ...args) {
   return originalCreateServer.call(this, requestListener, ...args);
 };
 
-console.log('[Demo] Demo Videos + Fire Detection backend hook loaded.');
+console.log('[Demo] Real-time fire overlay backend hook loaded.');
