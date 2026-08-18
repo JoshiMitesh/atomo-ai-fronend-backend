@@ -9,9 +9,10 @@ const DEMO_ROOT = path.join(ROOT, 'demo_media');
 const DEMO_VIDEOS = path.join(DEMO_ROOT, 'videos');
 const FIRE_VIDEOS = path.join(DEMO_ROOT, 'fire_videos');
 const FIRE_EVENTS = path.join(DEMO_ROOT, 'fire_events');
+const FIRE_PREVIEWS = path.join(DEMO_ROOT, 'fire_previews');
 const EVENTS_JSON = path.join(FIRE_EVENTS, 'events.json');
 
-for (const dir of [DEMO_VIDEOS, FIRE_VIDEOS, FIRE_EVENTS]) fs.mkdirSync(dir, { recursive: true });
+for (const dir of [DEMO_VIDEOS, FIRE_VIDEOS, FIRE_EVENTS, FIRE_PREVIEWS]) fs.mkdirSync(dir, { recursive: true });
 if (!fs.existsSync(EVENTS_JSON)) fs.writeFileSync(EVENTS_JSON, '[]\n');
 
 const VIDEO_EXT = new Set(['.mp4', '.webm', '.mov', '.mkv', '.avi', '.m4v']);
@@ -27,10 +28,7 @@ function safeName(name) {
 function listVideos(dir, routePrefix) {
   return fs.readdirSync(dir, { withFileTypes: true })
     .filter((x) => x.isFile() && VIDEO_EXT.has(path.extname(x.name).toLowerCase()))
-    .map((x) => ({
-      name: x.name,
-      url: `${routePrefix}/${encodeURIComponent(x.name)}`,
-    }))
+    .map((x) => ({ name: x.name, url: `${routePrefix}/${encodeURIComponent(x.name)}` }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -52,78 +50,79 @@ function resolveFireConfig() {
   };
 }
 
+function publicJob(job) {
+  const { child, ...safe } = job;
+  return safe;
+}
+
 function attach(app) {
   if (!app || app.__atomicDemoBackendInstalled) return;
   app.__atomicDemoBackendInstalled = true;
 
-  // These are attached before server.js adds its normal routes/static handlers,
-  // because this hook patches http.createServer(app).
   app.use('/demo-media/videos', express.static(DEMO_VIDEOS));
   app.use('/demo-media/fire-videos', express.static(FIRE_VIDEOS));
   app.use('/demo-media/fire-events', express.static(FIRE_EVENTS));
+  app.use('/demo-media/fire-previews', express.static(FIRE_PREVIEWS, { etag: false, maxAge: 0 }));
 
-  app.get('/api/demo/videos', (_req, res) => {
-    res.json(listVideos(DEMO_VIDEOS, '/demo-media/videos'));
-  });
-
-  app.get('/api/demo/fire/videos', (_req, res) => {
-    res.json(listVideos(FIRE_VIDEOS, '/demo-media/fire-videos'));
-  });
-
-  app.get('/api/demo/fire/events', (_req, res) => {
-    res.json(readEvents());
-  });
+  app.get('/api/demo/videos', (_req, res) => res.json(listVideos(DEMO_VIDEOS, '/demo-media/videos')));
+  app.get('/api/demo/fire/videos', (_req, res) => res.json(listVideos(FIRE_VIDEOS, '/demo-media/fire-videos')));
+  app.get('/api/demo/fire/events', (_req, res) => res.json(readEvents().filter((e) => e.label === 'fire')));
 
   app.get('/api/demo/fire/jobs/:id', (req, res) => {
     const job = jobs.get(req.params.id);
     if (!job) return res.status(404).json({ error: 'Detection job not found.' });
-    res.json(job);
+    res.json(publicJob(job));
+  });
+
+  app.post('/api/demo/fire/jobs/:id/stop', (req, res) => {
+    const job = jobs.get(req.params.id);
+    if (!job) return res.status(404).json({ error: 'Detection job not found.' });
+    if (job.child && !job.child.killed && ['starting', 'running'].includes(job.status)) {
+      job.status = 'stopping';
+      job.child.kill('SIGTERM');
+    }
+    res.json(publicJob(job));
   });
 
   app.post('/api/demo/fire/start', express.json(), (req, res) => {
     const name = safeName(req.body && req.body.video);
     if (!name) return res.status(400).json({ error: 'Valid video name is required.' });
-
     const input = path.join(FIRE_VIDEOS, name);
-    if (!fs.existsSync(input)) {
-      return res.status(404).json({ error: `Fire demo video not found: ${name}` });
-    }
+    if (!fs.existsSync(input)) return res.status(404).json({ error: `Fire demo video not found: ${name}` });
 
     const cfg = resolveFireConfig();
     for (const [label, file] of Object.entries({ detector: cfg.script, model: cfg.model, library: cfg.library })) {
-      if (!fs.existsSync(file)) {
-        return res.status(500).json({ error: `${label} file not found: ${file}` });
+      if (!fs.existsSync(file)) return res.status(500).json({ error: `${label} file not found: ${file}` });
+    }
+
+    // Stop an older demo detector before starting another. This prevents NPU
+    // contention and also makes navigation away from detection responsive.
+    for (const old of jobs.values()) {
+      if (old.child && !old.child.killed && ['starting', 'running'].includes(old.status)) {
+        old.status = 'stopping';
+        old.child.kill('SIGTERM');
       }
     }
 
     const id = `fire_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const previewName = `${id}.jpg`;
+    const previewPath = path.join(FIRE_PREVIEWS, previewName);
     const job = {
-      id,
-      video: name,
-      status: 'starting',
-      progress: 0,
-      error: null,
+      id, video: name, status: 'starting', progress: 0, error: null,
       started_at: new Date().toISOString(),
+      preview_url: `/demo-media/fire-previews/${encodeURIComponent(previewName)}`,
     };
     jobs.set(id, job);
 
-    const worker = path.join(ROOT, 'fire_demo_worker.py');
     const child = spawn(cfg.python, [
-      '-u', worker,
-      '--input', input,
-      '--script', cfg.script,
-      '--model', cfg.model,
-      '--library', cfg.library,
-      '--events-dir', FIRE_EVENTS,
-    ], {
-      cwd: ROOT,
-      env: process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+      '-u', path.join(ROOT, 'fire_demo_worker.py'),
+      '--input', input, '--script', cfg.script, '--model', cfg.model,
+      '--library', cfg.library, '--events-dir', FIRE_EVENTS, '--preview', previewPath,
+    ], { cwd: ROOT, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
 
+    job.child = child;
     job.pid = child.pid;
     job.status = 'running';
-
     let stdoutBuf = '';
     let stderrBuf = '';
 
@@ -131,26 +130,20 @@ function attach(app) {
       stdoutBuf += chunk.toString();
       const lines = stdoutBuf.split(/\r?\n/);
       stdoutBuf = lines.pop();
-
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
           const msg = JSON.parse(line);
           if (msg.type === 'progress') job.progress = msg.progress;
-          if (msg.type === 'event') {
+          if (msg.type === 'event' && msg.label === 'fire') {
             const events = readEvents();
-            const event = {
-              ...msg,
-              video: name,
-              image_url: `/demo-media/fire-events/${encodeURIComponent(msg.image)}`,
-            };
+            const event = { ...msg, video: name, image_url: `/demo-media/fire-events/${encodeURIComponent(msg.image)}` };
             events.unshift(event);
             writeEvents(events);
             job.last_event = event;
+            job.event_count = Number(job.event_count || 0) + 1;
           }
-        } catch (_) {
-          console.log(`[FireDemo] ${line}`);
-        }
+        } catch (_) { console.log(`[FireDemo] ${line}`); }
       }
     });
 
@@ -160,37 +153,27 @@ function attach(app) {
       if (stderrBuf.length > 12000) stderrBuf = stderrBuf.slice(-12000);
       console.error(`[FireDemo] ${text.trim()}`);
     });
-
-    child.on('error', (err) => {
-      job.status = 'error';
-      job.error = err.message;
-    });
-
-    child.on('close', (code) => {
+    child.on('error', (err) => { job.status = 'error'; job.error = err.message; });
+    child.on('close', (code, signal) => {
+      job.child = null;
       job.finished_at = new Date().toISOString();
       job.exit_code = code;
-      job.status = code === 0 ? 'completed' : 'error';
-      if (code === 0) {
-        job.progress = 100;
-      } else if (!job.error) {
-        job.error = stderrBuf.trim() || `Detector exited with code ${code}`;
-      }
+      if (signal === 'SIGTERM' || job.status === 'stopping') job.status = 'stopped';
+      else job.status = code === 0 ? 'completed' : 'error';
+      if (code === 0) job.progress = 100;
+      else if (job.status === 'error' && !job.error) job.error = stderrBuf.trim() || `Detector exited with code ${code}`;
     });
 
-    res.status(202).json(job);
+    res.status(202).json(publicJob(job));
   });
 
   console.log(`[Demo] Routes attached. Demo videos: ${DEMO_VIDEOS}`);
   console.log(`[Demo] Fire videos: ${FIRE_VIDEOS}`);
 }
 
-// server.js uses: const server = http.createServer(app)
-// Patch that exact point so routes are guaranteed to exist.
 const originalCreateServer = http.createServer;
 http.createServer = function patchedCreateServer(requestListener, ...args) {
-  if (requestListener && typeof requestListener.use === 'function') {
-    attach(requestListener);
-  }
+  if (requestListener && typeof requestListener.use === 'function') attach(requestListener);
   return originalCreateServer.call(this, requestListener, ...args);
 };
 
