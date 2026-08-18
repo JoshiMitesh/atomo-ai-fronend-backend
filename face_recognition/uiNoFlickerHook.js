@@ -10,8 +10,44 @@ const originalStatic = express.static;
 function patchAppJs(source) {
   let patched = source;
 
-  // Regardless of how many events the API returns, Live Monitor keeps only
-  // the newest 100. Historical events remain in SQLite/Event Gallery/reports.
+  // Clear button is intentionally removed from the UI. Guard its old listener
+  // so setupEventListeners() continues and Authorised/Unauthorised tabs work.
+  patched = patched.replace(
+`  // Clear Events logs
+  btnClearEvents.addEventListener('click', async () => {
+    if (confirm('Are you sure you want to clear the entire events log history? This will also remove saved cropped faces.')) {
+      try {
+        await fetch('/api/events', { method: 'DELETE' });
+      } catch (err) {
+        console.error('Failed to clear events:', err);
+      }
+    }
+  });`,
+`  // Clear Events button is intentionally hidden/removed in Atomic Vision.
+  if (btnClearEvents) {
+    btnClearEvents.addEventListener('click', async () => {
+      if (confirm('Are you sure you want to clear the entire events log history? This will also remove saved cropped faces.')) {
+        try {
+          await fetch('/api/events', { method: 'DELETE' });
+        } catch (err) {
+          console.error('Failed to clear events:', err);
+        }
+      }
+    });
+  }`
+  );
+
+  // Keep only latest 100 on initial WebSocket state too.
+  patched = patched.replace(
+    `    allEvents = msg.data.events;`,
+    `    allEvents = Array.isArray(msg.data.events) ? msg.data.events.slice(0, 100) : [];`
+  );
+
+  // Regardless of how many events fetchEvents() receives, keep newest 100.
+  patched = patched.replace(
+    /allEvents\s*=\s*await\s+res\.json\(\);/g,
+    `allEvents = (await res.json()).slice(0, 100);`
+  );
   patched = patched.replace(
     /allEvents\s*=\s*await\s+response\.json\(\);/g,
     `allEvents = (await response.json()).slice(0, 100);`
@@ -24,8 +60,7 @@ function patchAppJs(source) {
     if (currentPersonId && modalPersonDetails && !modalPersonDetails.classList.contains('hidden')) {`,
 `  } else if (msg.event === 'database_updated') {
     fetchPersons();
-    // Do not re-fetch/re-render the live events list here. Recognition events
-    // already arrive through recognition_event / recognition_update WebSockets.
+    // Recognition events already arrive through WebSocket; avoid full re-render.
     if (currentPersonId && modalPersonDetails && !modalPersonDetails.classList.contains('hidden')) {`
   );
 
@@ -35,7 +70,7 @@ function patchAppJs(source) {
     fetchEvents();`,
 `  } else if (msg.event === 'clusters_updated') {
     fetchClusters();
-    // Avoid rebuilding all event cards when an unknown cluster changes.`
+    // Avoid rebuilding all event cards when clusters change.`
   );
 
   patched = patched.replace(
@@ -134,4 +169,4 @@ express.static = function patchedStatic(root, options) {
   };
 };
 
-console.log('[UI] No-flicker live event updates enabled (latest 100 only).');
+console.log('[UI] No-flicker live events enabled; latest 100 + filters fixed.');
