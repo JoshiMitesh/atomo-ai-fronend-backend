@@ -1,4 +1,3 @@
-const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const originalStatic = express.static;
@@ -6,7 +5,7 @@ const originalStatic = express.static;
 const browserScript = String.raw`(() => {
 'use strict';
 const state={screen:'home',videos:[],fireVideos:[],events:[],selectedFire:null,job:null,poll:null};
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot',"'":'&#39;'}[c]));
 async function json(url,opts){const r=await fetch(url,opts);const b=await r.json().catch(()=>({}));if(!r.ok)throw new Error(b.error||('HTTP '+r.status));return b}
 function injectStyle(){if(document.getElementById('atomic-demo-style'))return;const s=document.createElement('style');s.id='atomic-demo-style';s.textContent='#atomic-demo-root{position:fixed;inset:0 0 0 265px;background:#090c12;color:#f4f6fb;z-index:8000;overflow:auto;padding:30px;font-family:inherit}.atomic-demo-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}.atomic-demo-head h1{font-size:28px;margin:0}.atomic-back,.atomic-btn{border:1px solid #2a3040;background:#151a25;color:#fff;border-radius:10px;padding:10px 15px;cursor:pointer}.atomic-btn.primary{background:#665cf6;border-color:#665cf6}.atomic-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:18px}.atomic-card{background:#121722;border:1px solid #242b3a;border-radius:16px;padding:18px;cursor:pointer;min-height:125px}.atomic-card h3{margin:8px 0}.atomic-card p,.atomic-muted{color:#9ca5b7}.atomic-video-card video{width:100%;aspect-ratio:16/9;background:#000;border-radius:10px;object-fit:cover}.atomic-tabs{display:flex;gap:10px;margin:0 0 20px}.atomic-tabs button{border:1px solid #2a3040;background:#151a25;color:#aeb5c4;padding:10px 16px;border-radius:10px;cursor:pointer}.atomic-tabs button.active{background:#665cf6;color:#fff}.atomic-event img{width:100%;aspect-ratio:16/10;object-fit:cover;border-radius:10px}.atomic-status{margin:14px 0;padding:12px 14px;border:1px solid #293044;border-radius:10px;background:#111620}.atomic-modal{position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:9000;display:flex;align-items:center;justify-content:center;padding:30px}.atomic-modal-box{width:min(1000px,92vw);background:#10141e;border:1px solid #2a3040;border-radius:16px;overflow:hidden}.atomic-modal-head{display:flex;justify-content:space-between;align-items:center;padding:16px 20px}.atomic-modal-head button{font-size:25px;background:none;border:0;color:white;cursor:pointer}.atomic-modal video{width:100%;max-height:75vh;background:#000;display:block}@media(max-width:850px){#atomic-demo-root{left:0;padding:18px}.atomic-grid{grid-template-columns:1fr}}';document.head.appendChild(s)}
 function root(){let r=document.getElementById('atomic-demo-root');if(!r){r=document.createElement('section');r.id='atomic-demo-root';document.body.appendChild(r)}return r}
@@ -25,21 +24,31 @@ function installNav(){if(document.querySelector('[data-atomic-demo-nav]'))return
 injectStyle();installNav();new MutationObserver(installNav).observe(document.documentElement,{childList:true,subtree:true});
 })();`;
 
+// Only serve the Demo browser script. Do NOT intercept index.html here.
+// This allows galleryHook.js to remain the owner of the transformed Atomic Vision
+// page (branding, Profiles merge, Event Gallery, report UI, Authorised labels, etc.).
 express.static = function demoUiStatic(root, options) {
   const normalStatic = originalStatic(root, options);
   const isPublicRoot = path.basename(path.resolve(root)) === 'public';
   if (!isPublicRoot) return normalStatic;
   return function demoStatic(req, res, next) {
-    if (req.path === '/' || req.path === '/index.html') {
-      try {
-        let html = fs.readFileSync(path.join(root, 'index.html'), 'utf8');
-        html = html.replace('</body>', '<script src="/demo-ui.js"></script>\n</body>');
-        res.type('html').send(html);
-        return;
-      } catch (err) { console.error('[Demo] Failed to inject Demo UI:', err.message); }
+    if (req.path === '/demo-ui.js') {
+      res.type('application/javascript').send(browserScript);
+      return;
     }
-    if (req.path === '/demo-ui.js') { res.type('application/javascript').send(browserScript); return; }
     normalStatic(req, res, next);
   };
 };
-console.log('[Demo] Demo sidebar UI enabled.');
+
+// Inject the Demo browser script into the already-transformed page using a tiny
+// middleware wrapper around send(). This preserves the HTML produced by earlier
+// Atomic Vision hooks instead of rereading the original AURA index.html.
+const originalSend = express.response.send;
+express.response.send = function patchedSend(body) {
+  if (typeof body === 'string' && body.includes('</body>') && !body.includes('/demo-ui.js')) {
+    body = body.replace('</body>', '<script src="/demo-ui.js"></script>\n</body>');
+  }
+  return originalSend.call(this, body);
+};
+
+console.log('[Demo] Demo sidebar UI enabled on top of Atomic Vision UI.');
