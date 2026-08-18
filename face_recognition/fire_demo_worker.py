@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 import cv2 as cv
@@ -32,15 +33,6 @@ def safe_box(box, width, height):
     return x1, y1, x2, y2
 
 
-def save_preview(path, frame):
-    if not path:
-        return
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp.jpg"
-    if cv.imwrite(tmp, frame, [cv.IMWRITE_JPEG_QUALITY, 82]):
-        os.replace(tmp, path)
-
-
 def save_fire_crop(frame, box, events_dir, stamp, index):
     h, w = frame.shape[:2]
     x1, y1, x2, y2 = safe_box(box, w, h)
@@ -63,16 +55,15 @@ def save_fire_crop(frame, box, events_dir, stamp, index):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Atomic Vision fire-demo event worker")
+    ap = argparse.ArgumentParser(description="Atomic Vision real-time fire demo worker")
     ap.add_argument("--input", required=True)
     ap.add_argument("--script", required=True)
     ap.add_argument("--model", required=True)
     ap.add_argument("--library", required=True)
     ap.add_argument("--events-dir", required=True)
-    ap.add_argument("--preview", default="")
     ap.add_argument("--threshold", type=float, default=0.15)
     ap.add_argument("--nms-threshold", type=float, default=0.45)
-    ap.add_argument("--sample-fps", type=float, default=6.0)
+    ap.add_argument("--sample-fps", type=float, default=4.0)
     ap.add_argument("--event-cooldown", type=float, default=2.0)
     args = ap.parse_args()
 
@@ -105,56 +96,76 @@ def main():
     if not np.isfinite(fps) or fps <= 0:
         fps = 25.0
     total_frames = int(cap.get(cv.CAP_PROP_FRAME_COUNT))
-    frame_step = max(1, int(round(fps / max(0.1, args.sample_fps))))
-    frame_index = 0
-    processed = 0
+    duration = (total_frames / fps) if total_frames > 0 else 0.0
+    interval = 1.0 / max(0.5, float(args.sample_fps))
     last_fire_event_at = -1e9
+    processed = 0
+    start_wall = time.monotonic()
+    next_sample_wall = start_wall
+
+    emit({
+        "type": "metadata",
+        "fps": fps,
+        "total_frames": total_frames,
+        "duration": duration,
+    })
 
     try:
         while True:
+            now_wall = time.monotonic()
+            if now_wall < next_sample_wall:
+                time.sleep(min(0.02, next_sample_wall - now_wall))
+                continue
+
+            elapsed = now_wall - start_wall
+            if duration > 0 and elapsed >= duration:
+                break
+
+            # Stay synchronized to real video time. If inference takes longer than
+            # one sample interval, jump forward instead of processing a backlog.
+            target_frame = max(0, int(elapsed * fps))
+            current_pos = int(cap.get(cv.CAP_PROP_POS_FRAMES))
+            if abs(target_frame - current_pos) > max(2, int(fps * 0.20)):
+                cap.set(cv.CAP_PROP_POS_FRAMES, target_frame)
+
             ok, frame = cap.read()
             if not ok or frame is None:
                 break
-            current_index = frame_index
-            frame_index += 1
-            if current_index % frame_step != 0:
-                continue
 
+            frame_pos = max(0, int(cap.get(cv.CAP_PROP_POS_FRAMES)) - 1)
+            video_time = frame_pos / fps
             processed += 1
-            _seq, boxes, scores, classes = detector.process_frame_sync(current_index + 1, frame)
-            video_time = current_index / fps
 
-            annotated = frame.copy()
+            _seq, boxes, scores, classes = detector.process_frame_sync(frame_pos + 1, frame)
+            h, w = frame.shape[:2]
+            overlays = []
             fire_hits = []
+
             for box, score, cls_id in zip(boxes, scores, classes):
                 cls_id = int(cls_id)
                 label = fire.CLASSES[cls_id] if 0 <= cls_id < len(fire.CLASSES) else str(cls_id)
                 if label not in ("fire", "smoke"):
                     continue
-                x1, y1, x2, y2 = safe_box(box, annotated.shape[1], annotated.shape[0])
-                color = fire.CLASS_COLORS.get(label, (0, 0, 255))
-                cv.rectangle(annotated, (x1, y1), (x2, y2), color, 3)
-                cv.putText(
-                    annotated,
-                    f"{label.upper()} {float(score):.2f}",
-                    (x1, max(25, y1 - 8)),
-                    cv.FONT_HERSHEY_SIMPLEX,
-                    0.75,
-                    color,
-                    2,
-                )
+                x1, y1, x2, y2 = safe_box(box, w, h)
+                overlays.append({
+                    "label": label,
+                    "score": float(score),
+                    "box": [x1, y1, x2, y2],
+                })
                 if label == "fire":
                     fire_hits.append((box, float(score), cls_id))
 
-            # Live UI preview: always write the currently processed frame, with
-            # boxes when fire/smoke is detected. Atomic replace avoids partial JPGs.
-            save_preview(args.preview, annotated)
+            emit({
+                "type": "detections",
+                "video_time": video_time,
+                "frame_width": w,
+                "frame_height": h,
+                "detections": overlays,
+            })
 
-            if total_frames > 0:
-                emit({"type": "progress", "progress": min(99, int((current_index + 1) * 100 / total_frames))})
+            if duration > 0:
+                emit({"type": "progress", "progress": min(99, int(video_time * 100.0 / duration))})
 
-            # Events are FIRE ONLY, and each saved image is only the detected
-            # fire region (with a small context pad), never the full video frame.
             if fire_hits and video_time - last_fire_event_at >= args.event_cooldown:
                 now = datetime.now(timezone.utc)
                 stamp = now.strftime("%Y%m%d_%H%M%S_%f")
@@ -172,10 +183,18 @@ def main():
                         "image": image_name,
                     })
                 last_fire_event_at = video_time
+
+            # Keep sample cadence tied to wall clock. If inference was slow,
+            # schedule from 'now' so we never build a queue of stale frames.
+            next_sample_wall += interval
+            finished = time.monotonic()
+            if finished > next_sample_wall + interval:
+                next_sample_wall = finished
     finally:
         cap.release()
         detector.stop()
 
+    emit({"type": "detections", "video_time": duration, "frame_width": 0, "frame_height": 0, "detections": []})
     emit({"type": "progress", "progress": 100})
     emit({"type": "done", "processed_frames": processed})
 
