@@ -4,8 +4,8 @@
   "description": "Real-time face recognition server using YuNet and SFace",
   "main": "server.js",
   "scripts": {
-    "start": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./clusterToolsHook.js -r ./galleryHook.js -r ./eventDetailsHook.js -r ./demoBackendHook.js -r ./demoUIHook.js server.js",
-    "dev": "node -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./clusterToolsHook.js -r ./galleryHook.js -r ./eventDetailsHook.js -r ./demoBackendHook.js -r ./demoUIHook.js server.js",
+    "start": "node -r ./offlineAssetsHook.js -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./clusterToolsHook.js -r ./galleryHook.js -r ./eventDetailsHook.js -r ./demoBackendHook.js -r ./demoUIHook.js server.js",
+    "dev": "node -r ./offlineAssetsHook.js -r ./sqliteHook.js -r ./reportHook.js -r ./uiNoFlickerHook.js -r ./clusterToolsHook.js -r ./galleryHook.js -r ./eventDetailsHook.js -r ./demoBackendHook.js -r ./demoUIHook.js server.js",
     "reset-db": "node -r ./sqliteHook.js -e \"require('./db.js').resetAll()\""
   },
   "dependencies": {
