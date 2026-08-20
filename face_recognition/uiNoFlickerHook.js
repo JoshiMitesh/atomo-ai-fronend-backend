@@ -147,6 +147,10 @@ function patchAppJs(source) {
 }`
   );
 
+  // LAN-only live streaming: the recovery helper replaces the original WHEP
+  // connection routine after app.js loads. No public STUN/TURN service is used.
+  patched += `\n;(() => {\n  const s=document.createElement('script');\n  s.src='/js/offlineRtspRecovery.js?v=1';\n  s.async=false;\n  document.head.appendChild(s);\n})();\n`;
+
   return patched;
 }
 
@@ -169,4 +173,4 @@ express.static = function patchedStatic(root, options) {
   };
 };
 
-console.log('[UI] No-flicker live events enabled; latest 100 + filters fixed.');
+console.log('[UI] No-flicker live events + LAN-only RTSP/WebRTC auto recovery enabled.');
