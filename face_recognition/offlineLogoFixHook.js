@@ -1,8 +1,5 @@
 const express = require('express');
 
-// Final offline UI pass: keep the Atomic Vision mark completely self-contained.
-// The logo is inlined into the HTML so it does not depend on a browser fetching
-// an SVG asset while the device is offline.
 const previousSend = express.response.send;
 
 const atomicLogoSvg = '<svg class="atomic-logo-inline" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 736 756" role="img" aria-label="Atomic Vision logo"><g fill="none" stroke="currentColor" stroke-width="30"><ellipse cx="368" cy="407" rx="132" ry="334"/><ellipse cx="368" cy="407" rx="132" ry="334" transform="rotate(60 368 407)"/><ellipse cx="368" cy="407" rx="132" ry="334" transform="rotate(-60 368 407)"/><circle cx="368" cy="75" r="58"/><circle cx="80" cy="575" r="58"/><circle cx="656" cy="575" r="58"/></g></svg>';
@@ -15,20 +12,17 @@ const css = `<style id="atomic-offline-logo-fix">
 </style>`;
 
 express.response.send = function atomicOfflineLogoSend(body) {
-  if (typeof body === 'string' && /<html[\\s>]/i.test(body)) {
+  if (typeof body === 'string' && /<html[\s>]/i.test(body)) {
     body = body
-      // Remove WAN-only font/icon styles. The existing offlineAssetsHook supplies
-      // local/system fallbacks for the icons after these links are removed.
-      .replace(/\\s*<link[^>]+href=["']https:\\/\\/fonts\\.googleapis\\.com[^>]*>/gi, '')
-      .replace(/\\s*<link[^>]+href=["']https:\\/\\/fonts\\.gstatic\\.com[^>]*>/gi, '')
-      .replace(/\\s*<link[^>]+rel=["']preconnect["'][^>]+fonts\\.(googleapis|gstatic)\\.com[^>]*>/gi, '')
-      .replace(/\\s*<link[^>]+href=["']https:\\/\\/cdnjs\\.cloudflare\\.com\\/ajax\\/libs\\/font-awesome[^>]*>/gi, '');
+      .replace(/\s*<link[^>]+href=["']https:\/\/fonts\.googleapis\.com[^>]*>/gi, '')
+      .replace(/\s*<link[^>]+href=["']https:\/\/fonts\.gstatic\.com[^>]*>/gi, '')
+      .replace(/\s*<link[^>]+rel=["']preconnect["'][^>]+fonts\.(googleapis|gstatic)\.com[^>]*>/gi, '')
+      .replace(/\s*<link[^>]+href=["']https:\/\/cdnjs\.cloudflare\.com\/ajax\/libs\/font-awesome[^>]*>/gi, '');
 
     const logoBlock = `<div class="logo-icon atomic-logo-wrap">${atomicLogoSvg}</div><span class="logo-text atomic-brand">Atomic Vision</span>`;
 
-    // Handle the original AURA markup as well as the already-patched Atomic Vision markup.
     body = body.replace(
-      /<div class="logo-icon(?: atomic-logo-wrap)?">[\\s\\S]*?<\\/div>\\s*<span class="logo-text(?: atomic-brand)?">(?:AURA|Atomic Vision)<\\/span>/i,
+      /<div class="logo-icon(?: atomic-logo-wrap)?">[\s\S]*?<\/div>\s*<span class="logo-text(?: atomic-brand)?">(?:AURA|Atomic Vision)<\/span>/i,
       logoBlock
     );
 
