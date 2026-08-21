@@ -33,11 +33,10 @@ def configure_dnn_target(net):
         log(f"Failed to set TIM-VX NPU backend for ONNX model, using CPU fallback: {str(e)}")
 
 class YuNet:
-    def __init__(self, modelPath: str, confThreshold: float = 0.90, try_npu: bool = True):
+    def __init__(self, modelPath: str, confThreshold: float = 0.80, try_npu: bool = True):
         self.try_npu = try_npu
-        # Keep 0.90 detector confidence to avoid false detections. Distant-face
-        # recall is improved by preserving more input pixels, not by lowering
-        # this threshold.
+        # Keep 0.80 detector confidence. Distant-face recall is improved by preserving
+        # more input pixels while avoiding very low-confidence false detections.
         self._model = None
         if try_npu:
             try:
