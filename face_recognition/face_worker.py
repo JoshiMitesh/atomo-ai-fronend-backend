@@ -11,7 +11,6 @@ import subprocess
 import cv2 as cv
 cv.setNumThreads(2)
 import numpy as np
-from huggingface_hub import hf_hub_download
 
 npu_lock = threading.Lock()
 
@@ -139,11 +138,31 @@ streams_lock = threading.Lock()
 
 def load_models():
     global detector, recog, yunet_path, sface_path
-    log("Downloading models...")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    model_dir = os.path.join(base_dir, "model")
+    yunet_path = os.path.join(model_dir, "face_detection_yunet_2023mar_int8.onnx")
+    sface_path = os.path.join(model_dir, "face_recognition_sface_2021dec_int8.onnx")
+    
+    # Ensure local directory exists
+    os.makedirs(model_dir, exist_ok=True)
+    
+    # Download helper if missing
+    def check_and_download(local_path, url):
+        if not os.path.exists(local_path):
+            log(f"Model file {local_path} not found. Downloading...")
+            try:
+                import urllib.request
+                urllib.request.urlretrieve(url, local_path)
+                log(f"Downloaded model successfully to {local_path}")
+            except Exception as e:
+                log(f"Failed to download model from {url}: {str(e)}")
+                raise e
+
     try:
-        yunet_path = hf_hub_download("opencv/face_detection_yunet", "face_detection_yunet_2023mar_int8.onnx")
-        sface_path = hf_hub_download("opencv/face_recognition_sface", "face_recognition_sface_2021dec_int8.onnx")
-        log("Models downloaded successfully. Loading main thread instances...")
+        check_and_download(yunet_path, "https://huggingface.co/opencv/face_detection_yunet/resolve/main/face_detection_yunet_2023mar_int8.onnx")
+        check_and_download(sface_path, "https://huggingface.co/opencv/face_recognition_sface/resolve/main/face_recognition_sface_2021dec_int8.onnx")
+        
+        log("Loading models...")
         detector = YuNet(yunet_path)
         recog = SFace(sface_path)
         log("Models loaded in memory.")
@@ -250,7 +269,16 @@ def crop_and_save_face(img, box, crops_dir):
         except Exception:
             pass
         crop_filename = f"crop_{int(time.time())}_{random.randint(1000, 9999)}.jpg"
-        cv.imwrite(os.path.join(crops_dir, crop_filename), crop, [cv.IMWRITE_JPEG_QUALITY, 90])
+        temp_path = os.path.join(crops_dir, f"temp_{crop_filename}")
+        final_path = os.path.join(crops_dir, crop_filename)
+        cv.imwrite(temp_path, crop, [cv.IMWRITE_JPEG_QUALITY, 90])
+        try:
+            os.replace(temp_path, final_path)
+        except Exception:
+            try:
+                os.rename(temp_path, final_path)
+            except Exception:
+                pass
         return crop_filename
     return None
 

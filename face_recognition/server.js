@@ -605,7 +605,7 @@ function handlePythonMessage(msg) {
     const index = pendingRequests.findIndex(r => r.cmd === msg.cmd);
     if (index !== -1) {
       const req = pendingRequests.splice(index, 1)[0];
-      req.resolve(msg.response);
+      req.resolve(msg.response || msg);
     }
   }
 }
