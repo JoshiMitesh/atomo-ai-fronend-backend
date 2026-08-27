@@ -1,0 +1,451 @@
+# Copyright (c) 2024 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import asyncio
+import base64
+import io
+import mimetypes
+import re
+import tempfile
+import uuid
+from functools import partial
+from typing import Awaitable, Callable, List, Optional, Tuple, TypeVar, Union, overload
+from urllib.parse import parse_qs, urlparse
+
+import numpy as np
+import pandas as pd
+import requests
+from PIL import Image
+from typing_extensions import Literal, ParamSpec, TypeAlias, assert_never
+
+from ....utils.deps import function_requires_deps, is_dep_available
+from ....utils.flags import PDF_MIN_RENDER_SCALE, PDF_RENDER_SCALE
+from ...utils.pdf_rendering import DEFAULT_MAX_IMAGE_PIXELS, PDFRenderSizeError
+from ...utils.pdf_rendering import (
+    get_pdf_render_scale_within_pixel_limit as _get_pdf_render_scale_within_pixel_limit,
+)
+from ...utils.pdf_rendering import render_pdf_page_to_numpy
+from ...utils.pdfium_lock import pdfium_lock
+from .models import ImageInfo, PDFInfo, PDFPageInfo, TIFFInfo
+
+if is_dep_available("aiohttp"):
+    import aiohttp
+if is_dep_available("opencv-contrib-python"):
+    import cv2
+if is_dep_available("filetype"):
+    import filetype
+if is_dep_available("pypdfium2"):
+    import pypdfium2 as pdfium
+if is_dep_available("yarl"):
+    import yarl
+
+__all__ = [
+    "FileType",
+    "MAX_IMAGE_PIXELS",
+    "ImageTooLargeError",
+    "get_pdf_render_scale_within_pixel_limit",
+    "generate_log_id",
+    "is_url",
+    "infer_file_type",
+    "infer_file_ext",
+    "image_bytes_to_array",
+    "image_bytes_to_image",
+    "image_to_bytes",
+    "image_array_to_bytes",
+    "csv_bytes_to_data_frame",
+    "data_frame_to_bytes",
+    "base64_encode",
+    "read_pdf",
+    "read_tiff",
+    "is_tiff_bytes",
+    "file_to_images",
+    "get_image_info",
+    "write_to_temp_file",
+    "get_raw_bytes",
+    "get_raw_bytes_async",
+    "call_async",
+]
+
+FileType: TypeAlias = Literal["IMAGE", "PDF", "VIDEO", "AUDIO"]
+
+MAX_IMAGE_PIXELS: int = DEFAULT_MAX_IMAGE_PIXELS
+
+
+class ImageTooLargeError(Exception):
+    """Raised when decoded image height * width exceeds `MAX_IMAGE_PIXELS`."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        pixel_count: Optional[int] = None,
+        max_pixels: int = MAX_IMAGE_PIXELS,
+        page_index: Optional[int] = None,
+    ) -> None:
+        super().__init__(message)
+        self.width = width
+        self.height = height
+        self.pixel_count = pixel_count
+        self.max_pixels = max_pixels
+        self.page_index = page_index
+
+
+def ensure_image_pixel_limit(
+    image: np.ndarray, *, page_index: Optional[int] = None
+) -> None:
+    if image.ndim < 2:
+        return
+    h, w = int(image.shape[0]), int(image.shape[1])
+    pixels = h * w
+    if pixels > MAX_IMAGE_PIXELS:
+        msg = (
+            f"Image pixel count {pixels} (width={w}, height={h}) exceeds "
+            f"maximum allowed {MAX_IMAGE_PIXELS}."
+        )
+        if page_index is not None:
+            msg = f"Page {page_index}: {msg}"
+        raise ImageTooLargeError(
+            msg,
+            width=w,
+            height=h,
+            pixel_count=pixels,
+            max_pixels=MAX_IMAGE_PIXELS,
+            page_index=page_index,
+        )
+
+
+def get_pdf_render_scale_within_pixel_limit(
+    page_size: Tuple[float, float],
+    *,
+    page_index: int,
+    requested_scale: float = PDF_RENDER_SCALE,
+    min_scale: float = PDF_MIN_RENDER_SCALE,
+    max_pixels: int = MAX_IMAGE_PIXELS,
+) -> float:
+    try:
+        return _get_pdf_render_scale_within_pixel_limit(
+            page_size,
+            page_index=page_index,
+            requested_scale=requested_scale,
+            min_scale=min_scale,
+            max_pixels=max_pixels,
+        )
+    except PDFRenderSizeError as exc:
+        raise _pdf_render_size_error_to_image_too_large_error(exc) from exc
+
+
+def _pdf_render_size_error_to_image_too_large_error(
+    exc: PDFRenderSizeError,
+) -> ImageTooLargeError:
+    return ImageTooLargeError(
+        str(exc),
+        width=exc.width,
+        height=exc.height,
+        pixel_count=exc.pixel_count,
+        max_pixels=exc.max_pixels,
+        page_index=exc.page_index,
+    )
+
+
+P = ParamSpec("P")
+R = TypeVar("R")
+
+
+def generate_log_id() -> str:
+    return str(uuid.uuid4())
+
+
+# TODO:
+# 1. Use Pydantic to validate the URL and Base64-encoded string types for both
+#    input and output data instead of handling this manually.
+# 2. Define a `File` type for global use; this will be part of the contract.
+# 3. Consider using two separate fields instead of a union of URL and Base64,
+#    even though they are both strings. Backward compatibility should be
+#    maintained.
+def is_url(s: str) -> bool:
+    if not (s.startswith("http://") or s.startswith("https://")):
+        # Quick rejection
+        return False
+    result = urlparse(s)
+    return all([result.scheme, result.netloc]) and result.scheme in ("http", "https")
+
+
+def infer_file_type(url: str) -> Optional[FileType]:
+    url_parts = urlparse(url)
+    filename = url_parts.path.split("/")[-1]
+
+    file_type = mimetypes.guess_type(filename)[0]
+
+    if file_type is None:
+        # HACK: The support for BOS URLs with query params is implementation-based,
+        # not interface-based.
+        is_bos_url = re.fullmatch(r"\w+\.bcebos\.com", url_parts.netloc) is not None
+        if is_bos_url and url_parts.query:
+            params = parse_qs(url_parts.query)
+            if (
+                "responseContentDisposition" in params
+                and len(params["responseContentDisposition"]) == 1
+            ):
+                match_ = re.match(
+                    r"attachment;filename=(.*)", params["responseContentDisposition"][0]
+                )
+                if match_:
+                    file_type = mimetypes.guess_type(match_.group(1))[0]
+        if file_type is None:
+            return None
+
+    if file_type.startswith("image/"):
+        return "IMAGE"
+    elif file_type == "application/pdf":
+        return "PDF"
+    elif file_type.startswith("video/"):
+        return "VIDEO"
+    elif file_type.startswith("audio/"):
+        return "AUDIO"
+    else:
+        return None
+
+
+@function_requires_deps("filetype")
+def infer_file_ext(file: str) -> Optional[str]:
+    if is_url(file):
+        url_parts = urlparse(file)
+        filename = url_parts.path.split("/")[-1]
+        mime_type = mimetypes.guess_type(filename)[0]
+        if mime_type is None:
+            return None
+        return mimetypes.guess_extension(mime_type)
+    else:
+        bytes_ = base64.b64decode(file)
+        return "." + filetype.guess_extension(bytes_)
+
+
+@function_requires_deps("opencv-contrib-python")
+def image_bytes_to_array(data: bytes) -> np.ndarray:
+    arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+    if arr is None:
+        raise ValueError("Failed to decode image bytes")
+    ensure_image_pixel_limit(arr)
+    return arr
+
+
+def image_bytes_to_image(data: bytes) -> Image.Image:
+    return Image.open(io.BytesIO(data))
+
+
+def image_to_bytes(image: Image.Image, format: str = "JPEG") -> bytes:
+    with io.BytesIO() as f:
+        image.save(f, format=format)
+        img_bytes = f.getvalue()
+    return img_bytes
+
+
+@function_requires_deps("opencv-contrib-python")
+def image_array_to_bytes(image: np.ndarray, ext: str = ".jpg") -> bytes:
+    image = cv2.imencode(ext, image)[1]
+    return image.tobytes()
+
+
+def csv_bytes_to_data_frame(data: bytes) -> pd.DataFrame:
+    with io.StringIO(data.decode("utf-8")) as f:
+        df = pd.read_csv(f)
+    return df
+
+
+def data_frame_to_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv().encode("utf-8")
+
+
+def base64_encode(data: bytes) -> str:
+    return base64.b64encode(data).decode("ascii")
+
+
+@function_requires_deps("pypdfium2", "opencv-contrib-python")
+def read_pdf(
+    bytes_: bytes, max_num_imgs: Optional[int] = None
+) -> Tuple[List[np.ndarray], PDFInfo]:
+    images: List[np.ndarray] = []
+    page_info_list: List[PDFPageInfo] = []
+    with pdfium_lock:
+        doc = pdfium.PdfDocument(bytes_)
+        doc.init_forms()
+        try:
+            page_number = 0
+            for page in doc:
+                try:
+                    if max_num_imgs is not None and len(images) >= max_num_imgs:
+                        break
+                    page_number += 1
+                    try:
+                        image = render_pdf_page_to_numpy(
+                            page,
+                            page_index=page_number,
+                            requested_scale=PDF_RENDER_SCALE,
+                            rotation=0,
+                            min_scale=PDF_MIN_RENDER_SCALE,
+                            max_pixels=MAX_IMAGE_PIXELS,
+                        )
+                    except PDFRenderSizeError as exc:
+                        raise _pdf_render_size_error_to_image_too_large_error(
+                            exc
+                        ) from exc
+                    ensure_image_pixel_limit(image, page_index=page_number)
+                    images.append(image)
+                    page_info = PDFPageInfo(
+                        width=image.shape[1],
+                        height=image.shape[0],
+                    )
+                    page_info_list.append(page_info)
+                finally:
+                    page.close()
+        finally:
+            doc.close()
+    pdf_info = PDFInfo(
+        numPages=len(page_info_list),
+        pages=page_info_list,
+    )
+    return images, pdf_info
+
+
+_TIFF_MAGIC = (b"II\x2a\x00", b"MM\x00\x2a")
+
+
+def is_tiff_bytes(data: bytes) -> bool:
+    return len(data) >= 4 and data[:4] in _TIFF_MAGIC
+
+
+@function_requires_deps("opencv-contrib-python")
+def read_tiff(
+    bytes_: bytes, max_num_imgs: Optional[int] = None
+) -> Tuple[List[np.ndarray], TIFFInfo]:
+    images: List[np.ndarray] = []
+    page_info_list: List[PDFPageInfo] = []
+    with Image.open(io.BytesIO(bytes_)) as img:
+        n_frames = getattr(img, "n_frames", 1)
+        for page_number in range(1, n_frames + 1):
+            if max_num_imgs is not None and len(images) >= max_num_imgs:
+                break
+            img.seek(page_number - 1)
+            frame = img.convert("RGB")
+            image = cv2.cvtColor(np.array(frame), cv2.COLOR_RGB2BGR)
+            ensure_image_pixel_limit(image, page_index=page_number)
+            images.append(image)
+            page_info_list.append(
+                PDFPageInfo(
+                    width=image.shape[1],
+                    height=image.shape[0],
+                )
+            )
+    tiff_info = TIFFInfo(
+        numPages=len(page_info_list),
+        pages=page_info_list,
+    )
+    return images, tiff_info
+
+
+@overload
+def file_to_images(
+    file_bytes: bytes,
+    file_type: Literal["IMAGE"],
+    *,
+    max_num_imgs: Optional[int] = ...,
+) -> Tuple[List[np.ndarray], ImageInfo]: ...
+
+
+@overload
+def file_to_images(
+    file_bytes: bytes,
+    file_type: Literal["PDF"],
+    *,
+    max_num_imgs: Optional[int] = ...,
+) -> Tuple[List[np.ndarray], PDFInfo]: ...
+
+
+@overload
+def file_to_images(
+    file_bytes: bytes,
+    file_type: Literal["IMAGE", "PDF"],
+    *,
+    max_num_imgs: Optional[int] = ...,
+) -> Union[
+    Tuple[List[np.ndarray], ImageInfo],
+    Tuple[List[np.ndarray], PDFInfo],
+    Tuple[List[np.ndarray], TIFFInfo],
+]: ...
+
+
+def file_to_images(
+    file_bytes: bytes,
+    file_type: Literal["IMAGE", "PDF"],
+    *,
+    max_num_imgs: Optional[int] = None,
+) -> Union[
+    Tuple[List[np.ndarray], ImageInfo],
+    Tuple[List[np.ndarray], PDFInfo],
+    Tuple[List[np.ndarray], TIFFInfo],
+]:
+    if file_type == "IMAGE":
+        if is_tiff_bytes(file_bytes):
+            with Image.open(io.BytesIO(file_bytes)) as img:
+                if getattr(img, "n_frames", 1) > 1:
+                    images, data_info = read_tiff(file_bytes, max_num_imgs=max_num_imgs)
+                else:
+                    images = [image_bytes_to_array(file_bytes)]
+                    data_info = get_image_info(images[0])
+        else:
+            images = [image_bytes_to_array(file_bytes)]
+            data_info = get_image_info(images[0])
+    elif file_type == "PDF":
+        images, data_info = read_pdf(file_bytes, max_num_imgs=max_num_imgs)
+    else:
+        assert_never(file_type)
+    return images, data_info
+
+
+def get_image_info(image: np.ndarray) -> ImageInfo:
+    return ImageInfo(width=image.shape[1], height=image.shape[0])
+
+
+def write_to_temp_file(file_bytes: bytes, suffix: str) -> str:
+    with tempfile.NamedTemporaryFile("wb", suffix=suffix, delete=False) as f:
+        f.write(file_bytes)
+        return f.name
+
+
+def get_raw_bytes(file: str) -> bytes:
+    if is_url(file):
+        resp = requests.get(file, timeout=30)
+        resp.raise_for_status()
+        return resp.content
+    else:
+        return base64.b64decode(file)
+
+
+@function_requires_deps("aiohttp", "yarl")
+async def get_raw_bytes_async(file: str, session: "aiohttp.ClientSession") -> bytes:
+    if is_url(file):
+        async with session.get(yarl.URL(file, encoded=True)) as resp:
+            return await resp.read()
+    else:
+        return base64.b64decode(file)
+
+
+def call_async(
+    func: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs
+) -> Awaitable[R]:
+    return asyncio.get_running_loop().run_in_executor(
+        None, partial(func, *args, **kwargs)
+    )
